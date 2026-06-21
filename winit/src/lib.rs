@@ -1627,6 +1627,16 @@ fn run_action<'a, P, C>(
                     }
                 }
             }
+            system::Action::GetGraphicsInformation(channel) => {
+                if let Some(compositor) = compositor {
+                    let information = compositor.information();
+
+                    let _ = channel.send(system::GraphicsInformation {
+                        adapter: information.adapter,
+                        backend: information.backend,
+                    });
+                }
+            }
             system::Action::GetTheme(channel) => {
                 let _ = channel.send(*system_theme);
             }
