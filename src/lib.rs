@@ -602,6 +602,10 @@ pub mod system {
     //! Retrieve system information.
     pub use crate::runtime::system::{theme, theme_changes};
 
+    pub use crate::runtime::system::{
+        GraphicsInformation, graphics_information,
+    };
+
     #[cfg(feature = "sysinfo")]
     pub use crate::runtime::system::{Information, information};
 }

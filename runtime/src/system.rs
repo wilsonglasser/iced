@@ -10,6 +10,13 @@ pub enum Action {
     /// Send available system information.
     GetInformation(oneshot::Sender<Information>),
 
+    /// Send the active graphics adapter and backend. Unlike
+    /// [`Action::GetInformation`], this needs no `sysinfo` feature: it
+    /// reads only what the compositor already knows, so an application
+    /// can show which renderer is actually in use (e.g. to diagnose a
+    /// backend fallback) without pulling in system profiling.
+    GetGraphicsInformation(oneshot::Sender<GraphicsInformation>),
+
     /// Send the current system theme mode.
     GetTheme(oneshot::Sender<theme::Mode>),
 
@@ -47,9 +54,34 @@ pub struct Information {
     pub graphics_adapter: String,
 }
 
+/// Contains information about the active graphics renderer.
+///
+/// A lightweight subset of [`Information`] sourced straight from the
+/// compositor, available without the `sysinfo` feature.
+#[derive(Clone, Debug)]
+pub struct GraphicsInformation {
+    /// Model information for the active graphics adapter.
+    pub adapter: String,
+    /// Underlying graphics backend for rendering (e.g. `Vulkan`,
+    /// `Metal`, `Dx12`, `Gl`).
+    pub backend: String,
+}
+
 /// Returns available system information.
 pub fn information() -> Task<Information> {
     task::oneshot(|channel| crate::Action::System(Action::GetInformation(channel)))
+}
+
+/// Returns the active graphics adapter and backend.
+///
+/// Resolves once the compositor exists. Needs no `sysinfo` feature, so
+/// an application can surface the renderer actually selected at startup
+/// (including a `WGPU_BACKEND` / `ICED_BACKEND` override or a runtime
+/// fallback) for diagnostics.
+pub fn graphics_information() -> Task<GraphicsInformation> {
+    task::oneshot(|channel| {
+        crate::Action::System(Action::GetGraphicsInformation(channel))
+    })
 }
 
 /// Returns the current system theme.
