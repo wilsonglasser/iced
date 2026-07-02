@@ -8,6 +8,18 @@ use crate::text;
 pub struct Engine {
     text_pipeline: text::Pipeline,
 
+    /// The bounds the shared per-surface clip mask currently encodes,
+    /// when known. Rebuilding the mask clears the entire window-sized
+    /// buffer, and dense clipped text (terminals, log views) triggers
+    /// a rebuild per text run, hundreds of full-screen memsets per
+    /// frame that dominate CPU time (iced#3368). Tracking the current
+    /// bounds lets [`Self::adjust_clip_mask`] skip the rebuild when
+    /// the mask already holds the requested rectangle. Must be reset
+    /// at every frame start ([`crate::Renderer::draw`]) because the
+    /// mask arrives from the caller with unknown content (fresh,
+    /// resized, or belonging to a different surface).
+    clip_mask_bounds: Option<Rectangle>,
+
     #[cfg(feature = "image")]
     pub(crate) raster_pipeline: crate::raster::Pipeline,
     #[cfg(feature = "svg")]
@@ -18,11 +30,44 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             text_pipeline: text::Pipeline::new(),
+            clip_mask_bounds: None,
             #[cfg(feature = "image")]
             raster_pipeline: crate::raster::Pipeline::new(),
             #[cfg(feature = "svg")]
             vector_pipeline: crate::vector::Pipeline::new(),
         }
+    }
+
+    /// Forgets what the clip mask currently holds, forcing the next
+    /// [`Self::adjust_clip_mask`] to rebuild it. Call it whenever the
+    /// mask buffer may have changed behind the engine's back, i.e. at
+    /// the start of every frame.
+    pub fn reset_clip_mask_memo(&mut self) {
+        self.clip_mask_bounds = None;
+    }
+
+    /// Sets `clip_mask` to exactly `bounds`, skipping the full-buffer
+    /// clear + fill when the mask already holds those bounds.
+    pub fn adjust_clip_mask(&mut self, clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
+        if self.clip_mask_bounds == Some(bounds) {
+            return;
+        }
+
+        clip_mask.clear();
+
+        let path = tiny_skia::PathBuilder::from_rect(
+            tiny_skia::Rect::from_xywh(bounds.x, bounds.y, bounds.width, bounds.height)
+                .expect("Create clip rectangle"),
+        );
+
+        clip_mask.fill_path(
+            &path,
+            tiny_skia::FillRule::EvenOdd,
+            false,
+            tiny_skia::Transform::default(),
+        );
+
+        self.clip_mask_bounds = Some(bounds);
     }
 
     pub fn draw_quad(
@@ -315,7 +360,7 @@ impl Engine {
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
                     true => None,
                     false => {
-                        adjust_clip_mask(clip_mask, clip_bounds);
+                        self.adjust_clip_mask(clip_mask, clip_bounds);
                         Some(clip_mask as &_)
                     }
                 };
@@ -344,7 +389,7 @@ impl Engine {
                     return;
                 };
 
-                adjust_clip_mask(clip_mask, clip_bounds);
+                self.adjust_clip_mask(clip_mask, clip_bounds);
 
                 self.text_pipeline.draw_editor(
                     editor,
@@ -378,7 +423,7 @@ impl Engine {
                 let clip_mask = match physical_bounds.is_within(&clip_bounds) {
                     true => None,
                     false => {
-                        adjust_clip_mask(clip_mask, clip_bounds);
+                        self.adjust_clip_mask(clip_mask, clip_bounds);
                         Some(clip_mask as &_)
                     }
                 };
@@ -530,7 +575,7 @@ impl Engine {
                 };
 
                 // TODO: Border radius
-                adjust_clip_mask(_clip_mask, clip_bounds);
+                self.adjust_clip_mask(_clip_mask, clip_bounds);
 
                 let center = bounds.center();
                 let radians = f32::from(image.rotation);
@@ -773,18 +818,60 @@ fn rounded_box_sdf(to_center: Vector, size: tiny_skia::Size, radii: &[f32]) -> f
     (x.powf(2.0) + y.powf(2.0)).sqrt() - radius
 }
 
-pub fn adjust_clip_mask(clip_mask: &mut tiny_skia::Mask, bounds: Rectangle) {
-    clip_mask.clear();
 
-    let path = tiny_skia::PathBuilder::from_rect(
-        tiny_skia::Rect::from_xywh(bounds.x, bounds.y, bounds.width, bounds.height)
-            .expect("Create clip rectangle"),
-    );
+#[cfg(test)]
+mod clip_mask_memo_tests {
+    use super::*;
 
-    clip_mask.fill_path(
-        &path,
-        tiny_skia::FillRule::EvenOdd,
-        false,
-        tiny_skia::Transform::default(),
-    );
+    fn rect(x: f32, y: f32, width: f32, height: f32) -> Rectangle {
+        Rectangle {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// The memo must mirror the actual mask content: after any
+    /// sequence of adjusts, the mask must equal a fresh rebuild of the
+    /// last requested bounds (guards against a stale skip).
+    #[test]
+    fn adjust_sequence_matches_fresh_rebuild() {
+        let a = rect(0.0, 0.0, 4.0, 4.0);
+        let b = rect(2.0, 2.0, 6.0, 6.0);
+
+        let mut engine = Engine::new();
+        let mut mask = tiny_skia::Mask::new(8, 8).expect("mask");
+        engine.adjust_clip_mask(&mut mask, a);
+        engine.adjust_clip_mask(&mut mask, b);
+        engine.adjust_clip_mask(&mut mask, a);
+
+        let mut fresh_engine = Engine::new();
+        let mut fresh = tiny_skia::Mask::new(8, 8).expect("mask");
+        fresh_engine.adjust_clip_mask(&mut fresh, a);
+
+        assert_eq!(mask.data(), fresh.data());
+    }
+
+    /// Same bounds twice must not rebuild (the whole point of the
+    /// memo): the second call leaves an externally-cleared mask alone.
+    #[test]
+    fn repeated_bounds_skip_the_rebuild() {
+        let a = rect(0.0, 0.0, 4.0, 4.0);
+
+        let mut engine = Engine::new();
+        let mut mask = tiny_skia::Mask::new(8, 8).expect("mask");
+        engine.adjust_clip_mask(&mut mask, a);
+
+        // Clobber the mask behind the engine's back; a skipped adjust
+        // won't repair it, proving the fast path was taken.
+        mask.clear();
+        engine.adjust_clip_mask(&mut mask, a);
+        assert!(mask.data().iter().all(|&byte| byte == 0));
+
+        // After a reset the same bounds must rebuild again.
+        engine.reset_clip_mask_memo();
+        engine.adjust_clip_mask(&mut mask, a);
+        assert!(mask.data().iter().any(|&byte| byte != 0));
+    }
 }
