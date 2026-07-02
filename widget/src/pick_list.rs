@@ -70,7 +70,9 @@ use crate::core::renderer;
 use crate::core::text::paragraph;
 use crate::core::text::{self, Text};
 use crate::core::touch;
+use crate::core::widget::operation::{self, Operation};
 use crate::core::widget::tree::{self, Tree};
+use crate::core::widget::Id;
 use crate::core::window;
 use crate::core::{
     Background, Border, Color, Element, Event, Layout, Length, Padding, Pixels, Point, Rectangle,
@@ -152,6 +154,7 @@ where
     Theme: Catalog,
     Renderer: text::Renderer,
 {
+    id: Option<Id>,
     options: L,
     to_string: Box<dyn Fn(&T) -> String + 'a>,
     on_select: Option<Box<dyn Fn(T) -> Message + 'a>>,
@@ -186,6 +189,7 @@ where
     /// selected value, and the message to produce when an option is selected.
     pub fn new(selected: Option<V>, options: L, to_string: impl Fn(&T) -> String + 'a) -> Self {
         Self {
+            id: None,
             to_string: Box::new(to_string),
             on_select: None,
             on_open: None,
@@ -206,6 +210,17 @@ where
             last_status: None,
             menu_height: Length::Shrink,
         }
+    }
+
+    /// Sets the [`Id`] of the [`PickList`], making it focusable via
+    /// `operation::focus`. A focused [`PickList`] is keyboard-operable:
+    /// Enter / Space open the menu (and confirm the hovered option
+    /// while open), the arrow keys move through the options (cycling
+    /// the value directly while closed, like an OS-native select),
+    /// and Escape closes the menu.
+    pub fn id(mut self, id: impl Into<Id>) -> Self {
+        self.id = Some(id.into());
+        self
     }
 
     /// Sets the placeholder of the [`PickList`].
@@ -427,6 +442,18 @@ where
         layout::Node::new(size)
     }
 
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        _renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
+
+        operation.focusable(self.id.as_ref(), layout.bounds(), state);
+    }
+
     fn update(
         &mut self,
         tree: &mut Tree,
@@ -456,6 +483,7 @@ where
                     let selected = self.selected.as_ref().map(Borrow::borrow);
 
                     state.is_open = true;
+                    state.is_focused = true;
                     state.hovered_option = self
                         .options
                         .borrow()
@@ -467,6 +495,10 @@ where
                     }
 
                     shell.capture_event();
+                } else {
+                    // A click anywhere else steals the keyboard, the
+                    // same way a text input unfocuses.
+                    state.is_focused = false;
                 }
             }
             Event::Mouse(mouse::Event::WheelScrolled {
@@ -515,6 +547,124 @@ where
                     shell.capture_event();
                 }
             }
+            Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+                let Some(on_select) = &self.on_select else {
+                    return;
+                };
+
+                if !state.is_focused || modifiers.command() || modifiers.alt() {
+                    return;
+                }
+
+                match key.as_ref() {
+                    keyboard::Key::Named(
+                        keyboard::key::Named::Enter | keyboard::key::Named::Space,
+                    )
+                    | keyboard::Key::Character(" ") => {
+                        if state.is_open {
+                            state.is_open = false;
+
+                            if let Some(option) = state
+                                .hovered_option
+                                .and_then(|index| self.options.borrow().get(index).cloned())
+                            {
+                                shell.publish((on_select)(option));
+                            }
+
+                            if let Some(on_close) = &self.on_close {
+                                shell.publish(on_close.clone());
+                            }
+                        } else {
+                            let selected = self.selected.as_ref().map(Borrow::borrow);
+
+                            state.is_open = true;
+                            state.hovered_option = self
+                                .options
+                                .borrow()
+                                .iter()
+                                .position(|option| Some(option) == selected);
+
+                            if let Some(on_open) = &self.on_open {
+                                shell.publish(on_open.clone());
+                            }
+                        }
+
+                        shell.capture_event();
+                    }
+                    keyboard::Key::Named(
+                        named @ (keyboard::key::Named::ArrowUp | keyboard::key::Named::ArrowDown),
+                    ) => {
+                        let forward = matches!(named, keyboard::key::Named::ArrowDown);
+                        let options = self.options.borrow();
+
+                        if options.is_empty() {
+                            shell.capture_event();
+                            return;
+                        }
+
+                        let step = |current: Option<usize>| match current {
+                            // Clamped at the ends, like an OS-native select.
+                            Some(index) => {
+                                if forward {
+                                    (index + 1).min(options.len() - 1)
+                                } else {
+                                    index.saturating_sub(1)
+                                }
+                            }
+                            None => {
+                                if forward {
+                                    0
+                                } else {
+                                    options.len() - 1
+                                }
+                            }
+                        };
+
+                        if state.is_open {
+                            state.hovered_option = Some(step(state.hovered_option));
+                        } else {
+                            // Closed: change the value in place.
+                            let current = self
+                                .selected
+                                .as_ref()
+                                .map(Borrow::borrow)
+                                .and_then(|selected| {
+                                    options.iter().position(|option| option == selected)
+                                });
+
+                            let next = step(current);
+
+                            if current != Some(next) {
+                                shell.publish((on_select)(options[next].clone()));
+                            }
+                        }
+
+                        shell.capture_event();
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::Escape) if state.is_open => {
+                        state.is_open = false;
+                        state.hovered_option = None;
+
+                        if let Some(on_close) = &self.on_close {
+                            shell.publish(on_close.clone());
+                        }
+
+                        shell.capture_event();
+                    }
+                    keyboard::Key::Named(keyboard::key::Named::Tab) if state.is_open => {
+                        // Tab moves focus onward; don't leave the menu
+                        // hanging without its keyboard owner. The event
+                        // is NOT captured so the focus chain still runs.
+                        state.is_open = false;
+                        state.hovered_option = None;
+
+                        if let Some(on_close) = &self.on_close {
+                            shell.publish(on_close.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
                 state.keyboard_modifiers = *modifiers;
             }
@@ -528,6 +678,8 @@ where
                 Status::Disabled
             } else if state.is_open {
                 Status::Opened { is_hovered }
+            } else if state.is_focused {
+                Status::Focused { is_hovered }
             } else if is_hovered {
                 Status::Hovered
             } else {
@@ -767,6 +919,7 @@ struct State<P: text::Paragraph> {
     menu: menu::State,
     keyboard_modifiers: keyboard::Modifiers,
     is_open: bool,
+    is_focused: bool,
     hovered_option: Option<usize>,
     options: Vec<paragraph::Plain<P>>,
     placeholder: paragraph::Plain<P>,
@@ -779,6 +932,7 @@ impl<P: text::Paragraph> State<P> {
             menu: menu::State::default(),
             keyboard_modifiers: keyboard::Modifiers::default(),
             is_open: bool::default(),
+            is_focused: bool::default(),
             hovered_option: Option::default(),
             options: Vec::new(),
             placeholder: paragraph::Plain::default(),
@@ -789,6 +943,24 @@ impl<P: text::Paragraph> State<P> {
 impl<P: text::Paragraph> Default for State<P> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl<P: text::Paragraph> operation::Focusable for State<P> {
+    fn is_focused(&self) -> bool {
+        self.is_focused
+    }
+
+    fn focus(&mut self) {
+        self.is_focused = true;
+    }
+
+    fn unfocus(&mut self) {
+        self.is_focused = false;
+
+        // Losing focus while the menu is open would leave a keyboard
+        // orphan; the overlay closes with the focus.
+        self.is_open = false;
     }
 }
 
@@ -843,6 +1015,11 @@ pub enum Status {
     Active,
     /// The [`PickList`] is being hovered.
     Hovered,
+    /// The [`PickList`] is focused (keyboard-operable) while closed.
+    Focused {
+        /// Whether the [`PickList`] is hovered, while focused.
+        is_hovered: bool,
+    },
     /// The [`PickList`] is open.
     Opened {
         /// Whether the [`PickList`] is hovered, while open.
@@ -919,7 +1096,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
 
     match status {
         Status::Active => active,
-        Status::Hovered | Status::Opened { .. } => Style {
+        Status::Hovered | Status::Focused { .. } | Status::Opened { .. } => Style {
             border: Border {
                 color: palette.primary.strong.color,
                 ..active.border
