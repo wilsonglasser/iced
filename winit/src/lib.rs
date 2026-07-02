@@ -831,6 +831,7 @@ async fn run_instance<P>(
                                     &program,
                                     &mut window_manager,
                                     caches,
+                                    &mut proxy,
                                 ));
 
                                 for action in actions {
@@ -981,7 +982,7 @@ async fn run_instance<P>(
                                 _ => {
                                     present_span.finish();
 
-                                    log::error!("Error {error:?} when presenting surface.");
+                                    log::warn!("Error {error:?} when presenting surface.");
 
                                     // Try rendering all windows again next frame.
                                     for (_id, window) in window_manager.iter_mut() {
@@ -1161,6 +1162,7 @@ async fn run_instance<P>(
                                 &program,
                                 &mut window_manager,
                                 cached_interfaces,
+                                &mut proxy,
                             ));
 
                             for action in actions {
@@ -1825,13 +1827,25 @@ pub fn build_user_interfaces<'a, P: Program, C>(
     program: &'a program::Instance<P>,
     window_manager: &mut window::Manager<P, C>,
     mut cached_user_interfaces: FxHashMap<window::Id, user_interface::Cache>,
+    proxy: &mut Proxy<P::Message>,
 ) -> FxHashMap<window::Id, UserInterface<'a, P::Message, P::Theme, P::Renderer>>
 where
     C: Compositor<Renderer = P::Renderer>,
     P::Theme: theme::Base,
 {
     for (id, window) in window_manager.iter_mut() {
+        let old_size = window.state.logical_size();
+
         window.state.synchronize(program, id, &window.raw);
+
+        let new_size = window.state.logical_size();
+
+        if old_size != new_size {
+            proxy.send_action(Action::Event {
+                window: id,
+                event: core::Event::Window(window::Event::Resized(new_size)),
+            });
+        }
 
         #[cfg(feature = "hinting")]
         window.renderer.hint(window.state.scale_factor());

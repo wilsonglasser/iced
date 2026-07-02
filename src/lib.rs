@@ -539,7 +539,7 @@ pub use crate::runtime::exit;
 pub use iced_futures::Subscription;
 
 pub use Alignment::Center;
-pub use Length::{Fill, FillPortion, Shrink};
+pub use Length::{Fill, FillPortion, Fit, Shrink};
 pub use alignment::Horizontal::{Left, Right};
 pub use alignment::Vertical::{Bottom, Top};
 
@@ -656,6 +656,7 @@ pub mod backend {
 
 pub use application::Application;
 pub use backend::Backend;
+pub use backend::PowerPreference;
 pub use daemon::Daemon;
 pub use error::Error;
 pub use event::Event;
