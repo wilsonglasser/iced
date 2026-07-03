@@ -137,6 +137,9 @@ pub fn present(
     background: Color,
     on_pre_present: impl FnOnce(),
 ) -> Result<(), compositor::SurfaceError> {
+    let perf_on = sw_perf::enabled();
+    let frame_start = perf_on.then(std::time::Instant::now);
+
     let physical_size = viewport.physical_size();
 
     let mut buffer = surface
@@ -170,6 +173,9 @@ pub fn present(
         })
         .unwrap_or_else(|| vec![Rectangle::with_size(viewport.logical_size())]);
 
+    let diff_done = perf_on.then(std::time::Instant::now);
+    let mut damage_px = 0.0_f64;
+
     if damage.is_empty() {
         if let Some(last_frame) = last_frame {
             surface.frames.push_front(last_frame.clone());
@@ -181,6 +187,12 @@ pub fn present(
         });
 
         let damage = damage::group(damage, Rectangle::with_size(viewport.logical_size()));
+        if perf_on {
+            damage_px = damage
+                .iter()
+                .map(|r| f64::from(r.width) * f64::from(r.height))
+                .sum();
+        }
 
         let mut pixels = tiny_skia::PixmapMut::from_bytes(
             bytemuck::cast_slice_mut(&mut buffer),
@@ -198,8 +210,122 @@ pub fn present(
         );
     }
 
+    let draw_done = perf_on.then(std::time::Instant::now);
+
     on_pre_present();
-    buffer.present().map_err(|_| compositor::SurfaceError::Lost)
+    let result = buffer.present().map_err(|_| compositor::SurfaceError::Lost);
+
+    if let (Some(started), Some(diff_done), Some(draw_done)) = (frame_start, diff_done, draw_done)
+    {
+        let logical = viewport.logical_size();
+        sw_perf::record(
+            diff_done - started,
+            draw_done - diff_done,
+            draw_done.elapsed(),
+            damage_px,
+            f64::from(logical.width) * f64::from(logical.height),
+        );
+    }
+
+    result
+}
+
+/// Env-gated software-render frame profiler (`ORYXIS_SW_PERF=1`).
+///
+/// Splits every presented frame into the three phases that matter for
+/// attributing software-mode slowness, and prints a one-line aggregate
+/// to stderr about once per second:
+///
+/// - `diff`: layer diffing to compute damage.
+/// - `draw`: tiny-skia rasterization of the damaged regions.
+/// - `present`: the softbuffer hand-off to the display server. On
+///   remoted compositors (WSLg forwarding over RDP, VNC, ...) this is
+///   where the transport cost shows up, so a high `present` with a low
+///   `draw` means the platform is the bottleneck, not the renderer.
+///
+/// `damage` reports how much of the surface was repainted on average,
+/// which separates full-window scroll frames from small localized
+/// updates.
+mod sw_perf {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    pub fn enabled() -> bool {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            std::env::var("ORYXIS_SW_PERF")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(false)
+        })
+    }
+
+    #[derive(Default)]
+    struct Totals {
+        frames: u32,
+        diff: Duration,
+        diff_max: Duration,
+        draw: Duration,
+        draw_max: Duration,
+        present: Duration,
+        present_max: Duration,
+        damage_px: f64,
+        surface_px: f64,
+    }
+
+    struct Window {
+        started: Instant,
+        totals: Totals,
+    }
+
+    static STATS: Mutex<Option<Window>> = Mutex::new(None);
+
+    pub fn record(
+        diff: Duration,
+        draw: Duration,
+        present: Duration,
+        damage_px: f64,
+        surface_px: f64,
+    ) {
+        let Ok(mut guard) = STATS.lock() else {
+            return;
+        };
+        let window = guard.get_or_insert_with(|| Window {
+            started: Instant::now(),
+            totals: Totals::default(),
+        });
+        let t = &mut window.totals;
+        t.frames += 1;
+        t.diff += diff;
+        t.diff_max = t.diff_max.max(diff);
+        t.draw += draw;
+        t.draw_max = t.draw_max.max(draw);
+        t.present += present;
+        t.present_max = t.present_max.max(present);
+        t.damage_px += damage_px;
+        t.surface_px += surface_px;
+
+        if window.started.elapsed() >= Duration::from_secs(1) {
+            let n = f64::from(t.frames.max(1));
+            let ms = |d: Duration| d.as_secs_f64() * 1e3;
+            eprintln!(
+                "sw-perf: {} frames | diff avg {:.1} max {:.1} | draw avg {:.1} max {:.1} | \
+                 present avg {:.1} max {:.1} (ms) | damage {:.0}% of surface",
+                t.frames,
+                ms(t.diff) / n,
+                ms(t.diff_max),
+                ms(t.draw) / n,
+                ms(t.draw_max),
+                ms(t.present) / n,
+                ms(t.present_max),
+                if t.surface_px > 0.0 {
+                    t.damage_px / t.surface_px * 100.0
+                } else {
+                    0.0
+                },
+            );
+            *guard = None;
+        }
+    }
 }
 
 pub fn screenshot(
