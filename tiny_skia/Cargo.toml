@@ -37,3 +37,7 @@ tiny-skia.workspace = true
 
 resvg.workspace = true
 resvg.optional = true
+
+[[example]]
+name = "terminal_frame_bench"
+required-features = ["geometry"]
