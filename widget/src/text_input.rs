@@ -926,7 +926,16 @@ where
                         _ => {}
                     }
 
-                    if let Some(text) = text {
+                    // Ctrl / logo chords are shortcuts, not typing: some
+                    // platforms still attach the base text to the event
+                    // ("#" for Ctrl+Shift+3), and inserting it turns every
+                    // application hotkey into a stray character in the
+                    // focused field. AltGr (reported as Ctrl+Alt on
+                    // Windows) must keep inserting composed characters.
+                    let is_command_chord = (modifiers.control() && !modifiers.alt())
+                        || modifiers.logo();
+
+                    if let Some(text) = text.as_ref().filter(|_| !is_command_chord) {
                         let Some(on_input) = &self.on_input else {
                             return;
                         };

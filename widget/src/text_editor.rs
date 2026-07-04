@@ -1126,7 +1126,14 @@ impl<Message> Binding<Message> {
             }
             keyboard::Key::Named(key::Named::Escape) => Some(Self::Unfocus),
             _ => {
-                if let Some(text) = text {
+                // Ctrl / logo chords are shortcuts, not typing: some
+                // platforms still attach the base text to the event
+                // ("#" for Ctrl+Shift+3); inserting it turns every
+                // application hotkey into stray characters. AltGr
+                // (Ctrl+Alt on Windows) keeps inserting composed chars.
+                let is_command_chord =
+                    (modifiers.control() && !modifiers.alt()) || modifiers.logo();
+                if let Some(text) = text.filter(|_| !is_command_chord) {
                     let c = text.chars().find(|c| !c.is_control())?;
 
                     Some(Self::Insert(c))
