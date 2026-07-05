@@ -53,6 +53,46 @@ pub fn is_focused(id: impl Into<Id>) -> Task<bool> {
     task::widget(operation::focusable::is_focused(id.into()))
 }
 
+/// Finds the [`Id`] of the currently focused widget, if any.
+///
+/// Unlike [`operation::focusable::find_focused`], which produces no value
+/// when nothing is focused, this always yields (`None` in that case), so a
+/// caller can react either way in a single message.
+pub fn find_focused() -> Task<Option<Id>> {
+    use crate::core::Rectangle;
+    use crate::core::widget::operation::{Focusable, Operation, Outcome};
+
+    struct FindFocused {
+        focused: Option<Id>,
+    }
+
+    impl Operation<Option<Id>> for FindFocused {
+        fn traverse(
+            &mut self,
+            operate: &mut dyn FnMut(&mut dyn Operation<Option<Id>>),
+        ) {
+            operate(self);
+        }
+
+        fn focusable(
+            &mut self,
+            id: Option<&Id>,
+            _bounds: Rectangle,
+            state: &mut dyn Focusable,
+        ) {
+            if state.is_focused() && id.is_some() {
+                self.focused = id.cloned();
+            }
+        }
+
+        fn finish(&self) -> Outcome<Option<Id>> {
+            Outcome::Some(self.focused.clone())
+        }
+    }
+
+    task::widget(FindFocused { focused: None })
+}
+
 /// Focuses the widget with the given [`Id`].
 pub fn focus<T>(id: impl Into<Id>) -> Task<T> {
     task::effect(Action::widget(operation::focusable::focus(id.into())))
