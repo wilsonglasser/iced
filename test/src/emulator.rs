@@ -336,59 +336,71 @@ impl<P: Program + 'static> Emulator<P> {
                     return;
                 };
 
+                // Events are dispatched one at a time so widget-level
+                // clipboard requests can be fulfilled from the emulated
+                // clipboard *between* events. In the winit shell the read
+                // completes asynchronously while later input (say, the key
+                // release of a `ctrl+v` chord) hasn't been delivered yet;
+                // fulfilling per event reproduces that ordering, a single
+                // batched update would let the release cancel the pending
+                // paste before the read result ever arrives.
+                let mut statuses = Vec::with_capacity(events.len());
+
                 for event in &events {
                     if let core::Event::Mouse(mouse::Event::CursorMoved { position }) = event {
                         self.cursor = mouse::Cursor::Available(*position);
                     }
-                }
 
-                let (state, statuses) = user_interface.update(
-                    &window::Headless,
-                    &shell::Waker::noop(),
-                    &events,
-                    self.cursor,
-                    &mut self.renderer,
-                    &mut messages,
-                );
-
-                // Fulfill widget-level clipboard requests (e.g. a paste in a
-                // `text_input`) from the emulated clipboard, feeding the
-                // results back as clipboard events, analogous to what the
-                // winit shell does with the system clipboard.
-                let mut clipboard_events = Vec::new();
-
-                if let user_interface::State::Updated {
-                    clipboard: requests,
-                    ..
-                } = state
-                {
-                    for kind in requests.reads {
-                        clipboard_events.push(core::Event::Clipboard(
-                            core::clipboard::Event::Read(
-                                read_clipboard(self.clipboard.as_ref(), kind)
-                                    .map(std::sync::Arc::new),
-                            ),
-                        ));
-                    }
-
-                    if let Some(content) = requests.write {
-                        self.clipboard = Some(content);
-
-                        clipboard_events.push(core::Event::Clipboard(
-                            core::clipboard::Event::Written(Ok(())),
-                        ));
-                    }
-                }
-
-                if !clipboard_events.is_empty() {
-                    let _ = user_interface.update(
+                    let (state, event_statuses) = user_interface.update(
                         &window::Headless,
                         &shell::Waker::noop(),
-                        &clipboard_events,
+                        std::slice::from_ref(event),
                         self.cursor,
                         &mut self.renderer,
                         &mut messages,
                     );
+
+                    statuses.extend(event_statuses);
+
+                    // Fulfill widget-level clipboard requests (e.g. a paste
+                    // in a `text_input`), feeding the results back as
+                    // clipboard events, analogous to what the winit shell
+                    // does with the system clipboard.
+                    let mut clipboard_events = Vec::new();
+
+                    if let user_interface::State::Updated {
+                        clipboard: requests,
+                        ..
+                    } = state
+                    {
+                        for kind in requests.reads {
+                            clipboard_events.push(core::Event::Clipboard(
+                                core::clipboard::Event::Read(
+                                    read_clipboard(self.clipboard.as_ref(), kind)
+                                        .map(std::sync::Arc::new),
+                                ),
+                            ));
+                        }
+
+                        if let Some(content) = requests.write {
+                            self.clipboard = Some(content);
+
+                            clipboard_events.push(core::Event::Clipboard(
+                                core::clipboard::Event::Written(Ok(())),
+                            ));
+                        }
+                    }
+
+                    if !clipboard_events.is_empty() {
+                        let _ = user_interface.update(
+                            &window::Headless,
+                            &shell::Waker::noop(),
+                            &clipboard_events,
+                            self.cursor,
+                            &mut self.renderer,
+                            &mut messages,
+                        );
+                    }
                 }
 
                 self.cache = Some(user_interface.into_cache());
