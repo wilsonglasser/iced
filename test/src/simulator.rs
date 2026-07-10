@@ -347,6 +347,22 @@ pub fn click() -> impl Iterator<Item = Event> {
 
 /// Returns the sequence of events of a key press.
 pub fn press_key(key: impl Into<keyboard::Key>, text: Option<SmolStr>) -> Event {
+    press_key_with_modifiers(key, text, keyboard::Modifiers::default())
+}
+
+/// Returns the sequence of events of a key release.
+pub fn release_key(key: impl Into<keyboard::Key>) -> Event {
+    release_key_with_modifiers(key, keyboard::Modifiers::default())
+}
+
+/// Returns the event of a key press performed while holding the given
+/// [`Modifiers`](keyboard::Modifiers) (e.g. the `k` press of a
+/// `ctrl+k` chord).
+pub fn press_key_with_modifiers(
+    key: impl Into<keyboard::Key>,
+    text: Option<SmolStr>,
+    modifiers: keyboard::Modifiers,
+) -> Event {
     let key = key.into();
 
     Event::Keyboard(keyboard::Event::KeyPressed {
@@ -356,14 +372,18 @@ pub fn press_key(key: impl Into<keyboard::Key>, text: Option<SmolStr>) -> Event 
             keyboard::key::NativeCode::Unidentified,
         ),
         location: keyboard::Location::Standard,
-        modifiers: keyboard::Modifiers::default(),
+        modifiers,
         repeat: false,
         text,
     })
 }
 
-/// Returns the sequence of events of a key release.
-pub fn release_key(key: impl Into<keyboard::Key>) -> Event {
+/// Returns the event of a key release performed while holding the
+/// given [`Modifiers`](keyboard::Modifiers).
+pub fn release_key_with_modifiers(
+    key: impl Into<keyboard::Key>,
+    modifiers: keyboard::Modifiers,
+) -> Event {
     let key = key.into();
 
     Event::Keyboard(keyboard::Event::KeyReleased {
@@ -373,7 +393,7 @@ pub fn release_key(key: impl Into<keyboard::Key>) -> Event {
             keyboard::key::NativeCode::Unidentified,
         ),
         location: keyboard::Location::Standard,
-        modifiers: keyboard::Modifiers::default(),
+        modifiers,
     })
 }
 

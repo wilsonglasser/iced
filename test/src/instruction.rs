@@ -1,7 +1,7 @@
 //! A step in an end-to-end test.
 use crate::core::keyboard;
 use crate::core::mouse;
-use crate::core::{Event, Point};
+use crate::core::{Event, Point, SmolStr};
 use crate::simulator;
 
 use std::fmt;
@@ -58,35 +58,86 @@ impl Interaction {
                     button: *button,
                     target: None,
                 },
+                mouse::Event::WheelScrolled { delta } => Mouse::Scroll {
+                    delta: *delta,
+                    target: None,
+                },
                 _ => None?,
             }),
             Event::Keyboard(keyboard) => Self::Keyboard(match keyboard {
-                keyboard::Event::KeyPressed { key, text, .. } => match key {
-                    keyboard::Key::Named(keyboard::key::Named::Enter) => {
-                        Keyboard::Press(Key::Enter)
+                keyboard::Event::KeyPressed {
+                    key,
+                    text,
+                    modifiers,
+                    ..
+                } => {
+                    // A command-modified press is a chord, not text input;
+                    // record it as a `Shortcut` so it round-trips through
+                    // the `ctrl+`/`alt+`/`logo+` syntax.
+                    if modifiers.command() | modifiers.alt() {
+                        Keyboard::Shortcut {
+                            modifiers: *modifiers,
+                            key: match key {
+                                keyboard::Key::Named(keyboard::key::Named::Enter) => Key::Enter,
+                                keyboard::Key::Named(keyboard::key::Named::Escape) => Key::Escape,
+                                keyboard::Key::Named(keyboard::key::Named::Tab) => Key::Tab,
+                                keyboard::Key::Named(keyboard::key::Named::Backspace) => {
+                                    Key::Backspace
+                                }
+                                keyboard::Key::Character(c) => {
+                                    let mut chars = c.chars();
+                                    let first = chars.next()?;
+
+                                    if chars.next().is_some() {
+                                        None?;
+                                    }
+
+                                    Key::Char(first)
+                                }
+                                _ => None?,
+                            },
+                        }
+                    } else {
+                        match key {
+                            keyboard::Key::Named(keyboard::key::Named::Enter) => {
+                                Keyboard::Press(Key::Enter)
+                            }
+                            keyboard::Key::Named(keyboard::key::Named::Escape) => {
+                                Keyboard::Press(Key::Escape)
+                            }
+                            keyboard::Key::Named(keyboard::key::Named::Tab) => {
+                                Keyboard::Press(Key::Tab)
+                            }
+                            keyboard::Key::Named(keyboard::key::Named::Backspace) => {
+                                Keyboard::Press(Key::Backspace)
+                            }
+                            _ => Keyboard::Typewrite(text.as_ref()?.to_string()),
+                        }
                     }
-                    keyboard::Key::Named(keyboard::key::Named::Escape) => {
-                        Keyboard::Press(Key::Escape)
+                }
+                keyboard::Event::KeyReleased { key, modifiers, .. } => {
+                    // The release half of a chord is already covered by the
+                    // `Shortcut` recorded on the press.
+                    if modifiers.command() | modifiers.alt() {
+                        None?;
                     }
-                    keyboard::Key::Named(keyboard::key::Named::Tab) => Keyboard::Press(Key::Tab),
-                    keyboard::Key::Named(keyboard::key::Named::Backspace) => {
-                        Keyboard::Press(Key::Backspace)
+
+                    match key {
+                        keyboard::Key::Named(keyboard::key::Named::Enter) => {
+                            Keyboard::Release(Key::Enter)
+                        }
+                        keyboard::Key::Named(keyboard::key::Named::Escape) => {
+                            Keyboard::Release(Key::Escape)
+                        }
+                        keyboard::Key::Named(keyboard::key::Named::Tab) => {
+                            Keyboard::Release(Key::Tab)
+                        }
+                        keyboard::Key::Named(keyboard::key::Named::Backspace) => {
+                            Keyboard::Release(Key::Backspace)
+                        }
+                        _ => None?,
                     }
-                    _ => Keyboard::Typewrite(text.as_ref()?.to_string()),
-                },
-                keyboard::Event::KeyReleased { key, .. } => match key {
-                    keyboard::Key::Named(keyboard::key::Named::Enter) => {
-                        Keyboard::Release(Key::Enter)
-                    }
-                    keyboard::Key::Named(keyboard::key::Named::Escape) => {
-                        Keyboard::Release(Key::Escape)
-                    }
-                    keyboard::Key::Named(keyboard::key::Named::Tab) => Keyboard::Release(Key::Tab),
-                    keyboard::Key::Named(keyboard::key::Named::Backspace) => {
-                        Keyboard::Release(Key::Backspace)
-                    }
-                    _ => None?,
-                },
+                }
                 keyboard::Event::ModifiersChanged(_) => None?,
             }),
             _ => None?,
@@ -134,6 +185,40 @@ impl Interaction {
                     }),
                     None,
                 ),
+                (
+                    Mouse::Move(to),
+                    Mouse::Scroll {
+                        delta,
+                        target: None,
+                    },
+                ) => (
+                    Self::Mouse(Mouse::Scroll {
+                        delta,
+                        target: Some(to),
+                    }),
+                    None,
+                ),
+                (
+                    Mouse::Scroll {
+                        delta: current,
+                        target: current_at,
+                    },
+                    Mouse::Scroll {
+                        delta: next,
+                        target: next_at,
+                    },
+                ) if (next_at.is_none() || next_at == current_at)
+                    && merge_scroll_deltas(current, next).is_some() =>
+                {
+                    (
+                        Self::Mouse(Mouse::Scroll {
+                            delta: merge_scroll_deltas(current, next)
+                                .expect("scroll deltas are mergeable"),
+                            target: current_at,
+                        }),
+                        None,
+                    )
+                }
                 (
                     Mouse::Press {
                         button: press,
@@ -254,14 +339,60 @@ impl Interaction {
                 } => {
                     vec![mouse_press(*button), mouse_release(*button)]
                 }
+                Mouse::Scroll {
+                    delta,
+                    target: Some(at),
+                } => {
+                    vec![
+                        mouse_move_(find_target(at)?),
+                        Event::Mouse(mouse::Event::WheelScrolled { delta: *delta }),
+                    ]
+                }
+                Mouse::Scroll {
+                    delta,
+                    target: None,
+                } => {
+                    vec![Event::Mouse(mouse::Event::WheelScrolled { delta: *delta })]
+                }
             },
             Interaction::Keyboard(keyboard) => match keyboard {
                 Keyboard::Press(key) => vec![key_press(*key)],
                 Keyboard::Release(key) => vec![key_release(*key)],
                 Keyboard::Type(key) => vec![key_press(*key), key_release(*key)],
                 Keyboard::Typewrite(text) => simulator::typewrite(text).collect(),
+                Keyboard::Shortcut { modifiers, key } => vec![
+                    Event::Keyboard(keyboard::Event::ModifiersChanged(*modifiers)),
+                    simulator::press_key_with_modifiers(*key, None, *modifiers),
+                    simulator::release_key_with_modifiers(*key, *modifiers),
+                    Event::Keyboard(keyboard::Event::ModifiersChanged(
+                        keyboard::Modifiers::default(),
+                    )),
+                ],
             },
         })
+    }
+}
+
+/// Sums two [`mouse::ScrollDelta`]s of the same unit, or returns
+/// `None` when the units differ.
+fn merge_scroll_deltas(
+    current: mouse::ScrollDelta,
+    next: mouse::ScrollDelta,
+) -> Option<mouse::ScrollDelta> {
+    match (current, next) {
+        (mouse::ScrollDelta::Lines { x, y }, mouse::ScrollDelta::Lines { x: dx, y: dy }) => {
+            Some(mouse::ScrollDelta::Lines {
+                x: x + dx,
+                y: y + dy,
+            })
+        }
+        (mouse::ScrollDelta::Pixels { x, y }, mouse::ScrollDelta::Pixels { x: dx, y: dy }) => {
+            Some(mouse::ScrollDelta::Pixels {
+                x: x + dx,
+                y: y + dy,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -300,6 +431,13 @@ pub enum Mouse {
         /// The location of the click.
         target: Option<Target>,
     },
+    /// The mouse wheel was scrolled.
+    Scroll {
+        /// The scroll movement.
+        delta: mouse::ScrollDelta,
+        /// The location of the scroll.
+        target: Option<Target>,
+    },
 }
 
 impl fmt::Display for Mouse {
@@ -316,6 +454,15 @@ impl fmt::Display for Mouse {
             }
             Mouse::Click { button, target } => {
                 write!(f, "click {}", format::button_at(*button, target.as_ref()))
+            }
+            Mouse::Scroll { delta, target } => {
+                write!(f, "scroll {}", format::scroll_delta(*delta))?;
+
+                if let Some(target) = target {
+                    write!(f, " {target}")?;
+                }
+
+                Ok(())
             }
         }
     }
@@ -353,6 +500,14 @@ pub enum Keyboard {
     Type(Key),
     /// A bunch of text was typed.
     Typewrite(String),
+    /// A key was "typed" while holding some modifiers
+    /// (e.g. `type ctrl+shift+f`).
+    Shortcut {
+        /// The modifiers held during the chord.
+        modifiers: keyboard::Modifiers,
+        /// The key typed while the modifiers were held.
+        key: Key,
+    },
 }
 
 impl fmt::Display for Keyboard {
@@ -370,6 +525,14 @@ impl fmt::Display for Keyboard {
             Keyboard::Typewrite(text) => {
                 write!(f, "type \"{text}\"")
             }
+            Keyboard::Shortcut { modifiers, key } => {
+                write!(
+                    f,
+                    "type {}{}",
+                    format::modifiers(*modifiers),
+                    format::key(*key)
+                )
+            }
         }
     }
 }
@@ -384,6 +547,8 @@ pub enum Key {
     Escape,
     Tab,
     Backspace,
+    /// A plain character key (e.g. the `k` of `ctrl+k`).
+    Char(char),
 }
 
 impl From<Key> for keyboard::Key {
@@ -393,6 +558,7 @@ impl From<Key> for keyboard::Key {
             Key::Escape => Self::Named(keyboard::key::Named::Escape),
             Key::Tab => Self::Named(keyboard::key::Named::Tab),
             Key::Backspace => Self::Named(keyboard::key::Named::Backspace),
+            Key::Char(c) => Self::Character(SmolStr::new(c.to_string())),
         }
     }
 }
@@ -429,13 +595,44 @@ mod format {
         format!("({:.2}, {:.2})", point.x, point.y)
     }
 
-    pub fn key(key: Key) -> &'static str {
-        match key {
-            Key::Enter => "enter",
-            Key::Escape => "escape",
-            Key::Tab => "tab",
-            Key::Backspace => "backspace",
+    pub fn scroll_delta(delta: mouse::ScrollDelta) -> String {
+        match delta {
+            mouse::ScrollDelta::Lines { x, y } => {
+                format!("({x:.2}, {y:.2})")
+            }
+            mouse::ScrollDelta::Pixels { x, y } => {
+                format!("pixels ({x:.2}, {y:.2})")
+            }
         }
+    }
+
+    pub fn key(key: Key) -> String {
+        match key {
+            Key::Enter => "enter".to_owned(),
+            Key::Escape => "escape".to_owned(),
+            Key::Tab => "tab".to_owned(),
+            Key::Backspace => "backspace".to_owned(),
+            Key::Char(c) => c.to_string(),
+        }
+    }
+
+    pub fn modifiers(modifiers: keyboard::Modifiers) -> String {
+        let mut chord = String::new();
+
+        if modifiers.control() {
+            chord.push_str("ctrl+");
+        }
+        if modifiers.shift() {
+            chord.push_str("shift+");
+        }
+        if modifiers.alt() {
+            chord.push_str("alt+");
+        }
+        if modifiers.logo() {
+            chord.push_str("logo+");
+        }
+
+        chord
     }
 
     pub fn string(text: &str) -> String {
@@ -475,12 +672,12 @@ mod parser {
     use nom::branch::alt;
     use nom::bytes::complete::tag;
     use nom::bytes::{is_not, take_while_m_n};
-    use nom::character::complete::{alphanumeric1, char, multispace0, multispace1};
+    use nom::character::complete::{alphanumeric1, char, multispace0, multispace1, satisfy};
     use nom::combinator::{map, map_opt, map_res, opt, recognize, success, value, verify};
     use nom::error::ParseError;
     use nom::multi::{fold, many1_count};
     use nom::number::float;
-    use nom::sequence::{delimited, preceded, separated_pair};
+    use nom::sequence::{delimited, preceded, separated_pair, terminated};
     use nom::{Finish, IResult, Parser};
 
     /// A parsing error.
@@ -504,9 +701,12 @@ mod parser {
     }
 
     fn interaction(input: &str) -> IResult<&str, Interaction> {
+        // Keyboard goes first: `press enter` must parse as a key press,
+        // not as a left-button mouse press with junk left over (the
+        // mouse `press` parser accepts a bare button).
         alt((
-            map(mouse, Interaction::Mouse),
             map(keyboard, Interaction::Keyboard),
+            map(mouse, Interaction::Mouse),
         ))
         .parse(input)
     }
@@ -514,7 +714,29 @@ mod parser {
     fn mouse(input: &str) -> IResult<&str, Mouse> {
         let mouse_move = preceded(tag("move "), target).map(Mouse::Move);
 
-        alt((mouse_move, mouse_click, mouse_press, mouse_release)).parse(input)
+        alt((
+            mouse_move,
+            mouse_click,
+            mouse_press,
+            mouse_release,
+            mouse_scroll,
+        ))
+        .parse(input)
+    }
+
+    fn mouse_scroll(input: &str) -> IResult<&str, Mouse> {
+        let (input, _) = tag("scroll ")(input)?;
+        let (input, pixels) = opt(tag("pixels ")).parse(input)?;
+        let (input, Point { x, y }) = point(input)?;
+        let (input, at) = opt(target).parse(input)?;
+
+        let delta = if pixels.is_some() {
+            mouse::ScrollDelta::Pixels { x, y }
+        } else {
+            mouse::ScrollDelta::Lines { x, y }
+        };
+
+        Ok((input, Mouse::Scroll { delta, target: at }))
     }
 
     fn mouse_click(input: &str) -> IResult<&str, Mouse> {
@@ -546,11 +768,16 @@ mod parser {
     }
 
     fn target(input: &str) -> IResult<&str, Target> {
-        alt((
-            id.map(String::from).map(Target::Id),
-            string.map(Target::Text),
-            point.map(Target::Point),
-        ))
+        // Leading whitespace is skipped so a target can follow a
+        // non-empty prefix (`click right "Text"`, `scroll (0, -3) #list`).
+        preceded(
+            multispace0,
+            alt((
+                id.map(String::from).map(Target::Id),
+                string.map(Target::Text),
+                point.map(Target::Point),
+            )),
+        )
         .parse(input)
     }
 
@@ -565,9 +792,42 @@ mod parser {
     fn keyboard(input: &str) -> IResult<&str, Keyboard> {
         alt((
             map(preceded(tag("type "), string), Keyboard::Typewrite),
+            map(preceded(tag("type "), chord), |(modifiers, key)| {
+                Keyboard::Shortcut { modifiers, key }
+            }),
             map(preceded(tag("type "), key), Keyboard::Type),
+            map(preceded(tag("press "), key), Keyboard::Press),
+            map(preceded(tag("release "), key), Keyboard::Release),
         ))
         .parse(input)
+    }
+
+    /// A modifier chord: one or more `ctrl+` / `shift+` / `alt+` /
+    /// `logo+` prefixes followed by a key (`ctrl+k`, `ctrl+shift+f`,
+    /// `alt+enter`).
+    fn chord(input: &str) -> IResult<&str, (keyboard::Modifiers, Key)> {
+        let modifier = terminated(
+            alt((
+                value(keyboard::Modifiers::CTRL, tag("ctrl")),
+                value(keyboard::Modifiers::SHIFT, tag("shift")),
+                value(keyboard::Modifiers::ALT, tag("alt")),
+                value(keyboard::Modifiers::LOGO, alt((tag("logo"), tag("cmd")))),
+            )),
+            char('+'),
+        );
+
+        let (input, modifiers) = fold(1.., modifier, keyboard::Modifiers::default, |acc, m| {
+            acc | m
+        })
+        .parse(input)?;
+
+        let (input, key) = alt((key, map(chord_char, Key::Char))).parse(input)?;
+
+        Ok((input, (modifiers, key)))
+    }
+
+    fn chord_char(input: &str) -> IResult<&str, char> {
+        satisfy(|c| c.is_ascii_alphanumeric()).parse(input)
     }
 
     fn expectation(input: &str) -> IResult<&str, Expectation> {
@@ -708,5 +968,129 @@ mod parser {
         });
 
         delimited(char('"'), build_string, char('"')).parse(input)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(line: &str) -> Instruction {
+        Instruction::parse(line).unwrap_or_else(|error| panic!("failed to parse {line:?}: {error}"))
+    }
+
+    fn roundtrip(line: &str) {
+        assert_eq!(
+            parse(line).to_string(),
+            line,
+            "instruction should round-trip"
+        );
+    }
+
+    #[test]
+    fn it_parses_scrolls() {
+        assert_eq!(
+            parse("scroll (0.00, -3.00)"),
+            Instruction::Interact(Interaction::Mouse(Mouse::Scroll {
+                delta: mouse::ScrollDelta::Lines { x: 0.0, y: -3.0 },
+                target: None,
+            }))
+        );
+
+        assert_eq!(
+            parse("scroll pixels (0.00, -120.00) \"Hosts\""),
+            Instruction::Interact(Interaction::Mouse(Mouse::Scroll {
+                delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -120.0 },
+                target: Some(Target::Text("Hosts".to_owned())),
+            }))
+        );
+
+        roundtrip("scroll (0.00, -3.00)");
+        roundtrip("scroll pixels (10.00, -120.00) #host-list");
+    }
+
+    #[test]
+    fn it_parses_shortcuts() {
+        assert_eq!(
+            parse("type ctrl+k"),
+            Instruction::Interact(Interaction::Keyboard(Keyboard::Shortcut {
+                modifiers: keyboard::Modifiers::CTRL,
+                key: Key::Char('k'),
+            }))
+        );
+
+        assert_eq!(
+            parse("type ctrl+shift+f"),
+            Instruction::Interact(Interaction::Keyboard(Keyboard::Shortcut {
+                modifiers: keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT,
+                key: Key::Char('f'),
+            }))
+        );
+
+        assert_eq!(
+            parse("type alt+enter"),
+            Instruction::Interact(Interaction::Keyboard(Keyboard::Shortcut {
+                modifiers: keyboard::Modifiers::ALT,
+                key: Key::Enter,
+            }))
+        );
+
+        roundtrip("type ctrl+k");
+        roundtrip("type ctrl+shift+f");
+        roundtrip("type alt+enter");
+    }
+
+    #[test]
+    fn it_parses_key_presses_as_keyboard_interactions() {
+        // `press enter` used to be swallowed by the mouse `press`
+        // parser (bare left button + ignored junk).
+        assert_eq!(
+            parse("press enter"),
+            Instruction::Interact(Interaction::Keyboard(Keyboard::Press(Key::Enter)))
+        );
+
+        assert_eq!(
+            parse("release tab"),
+            Instruction::Interact(Interaction::Keyboard(Keyboard::Release(Key::Tab)))
+        );
+
+        roundtrip("press enter");
+        roundtrip("release tab");
+    }
+
+    #[test]
+    fn it_parses_targets_after_buttons() {
+        // The space between a named button and its target used to make
+        // the target unparseable.
+        assert_eq!(
+            parse("click right \"Host\""),
+            Instruction::Interact(Interaction::Mouse(Mouse::Click {
+                button: mouse::Button::Right,
+                target: Some(Target::Text("Host".to_owned())),
+            }))
+        );
+
+        roundtrip("click right \"Host\"");
+    }
+
+    #[test]
+    fn it_merges_scrolls() {
+        let (merged, rest) = Interaction::Mouse(Mouse::Scroll {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 },
+            target: None,
+        })
+        .merge(Interaction::Mouse(Mouse::Scroll {
+            delta: mouse::ScrollDelta::Lines { x: 0.0, y: -2.0 },
+            target: None,
+        }));
+
+        assert_eq!(
+            merged,
+            Interaction::Mouse(Mouse::Scroll {
+                delta: mouse::ScrollDelta::Lines { x: 0.0, y: -3.0 },
+                target: None,
+            })
+        );
+        assert!(rest.is_none());
     }
 }

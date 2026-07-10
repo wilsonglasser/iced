@@ -42,6 +42,7 @@ pub struct Emulator<P: Program> {
     cursor: mouse::Cursor,
     cache: Option<user_interface::Cache>,
     pending_tasks: usize,
+    clipboard: Option<core::clipboard::Content>,
 }
 
 /// An emulation event.
@@ -114,6 +115,7 @@ impl<P: Program + 'static> Emulator<P> {
             window: core::window::Id::unique(),
             cache: Some(user_interface::Cache::default()),
             pending_tasks: 0,
+            clipboard: None,
         };
 
         emulator.resubscribe(program);
@@ -194,8 +196,17 @@ impl<P: Program + 'static> Emulator<P> {
                     self.cache = Some(user_interface.into_cache());
                 }
                 runtime::Action::Clipboard(action) => {
-                    // TODO
-                    dbg!(action);
+                    use crate::runtime::clipboard;
+
+                    match action {
+                        clipboard::Action::Read { kind, channel } => {
+                            let _ = channel.send(read_clipboard(self.clipboard.as_ref(), kind));
+                        }
+                        clipboard::Action::Write { content, channel } => {
+                            self.clipboard = Some(content);
+                            let _ = channel.send(Ok(()));
+                        }
+                    }
                 }
                 runtime::Action::Window(action) => {
                     use crate::runtime::window;
@@ -331,7 +342,7 @@ impl<P: Program + 'static> Emulator<P> {
                     }
                 }
 
-                let (_state, _status) = user_interface.update(
+                let (state, statuses) = user_interface.update(
                     &window::Headless,
                     &shell::Waker::noop(),
                     &events,
@@ -340,7 +351,58 @@ impl<P: Program + 'static> Emulator<P> {
                     &mut messages,
                 );
 
+                // Fulfill widget-level clipboard requests (e.g. a paste in a
+                // `text_input`) from the emulated clipboard, feeding the
+                // results back as clipboard events, analogous to what the
+                // winit shell does with the system clipboard.
+                let mut clipboard_events = Vec::new();
+
+                if let user_interface::State::Updated {
+                    clipboard: requests,
+                    ..
+                } = state
+                {
+                    for kind in requests.reads {
+                        clipboard_events.push(core::Event::Clipboard(
+                            core::clipboard::Event::Read(
+                                read_clipboard(self.clipboard.as_ref(), kind)
+                                    .map(std::sync::Arc::new),
+                            ),
+                        ));
+                    }
+
+                    if let Some(content) = requests.write {
+                        self.clipboard = Some(content);
+
+                        clipboard_events.push(core::Event::Clipboard(
+                            core::clipboard::Event::Written(Ok(())),
+                        ));
+                    }
+                }
+
+                if !clipboard_events.is_empty() {
+                    let _ = user_interface.update(
+                        &window::Headless,
+                        &shell::Waker::noop(),
+                        &clipboard_events,
+                        self.cursor,
+                        &mut self.renderer,
+                        &mut messages,
+                    );
+                }
+
                 self.cache = Some(user_interface.into_cache());
+
+                // Broadcast the simulated events to the running subscriptions,
+                // so global listeners (e.g. keyboard shortcut subscriptions or
+                // `event::listen`) observe them like they would in the shell.
+                for (event, status) in events.into_iter().zip(statuses) {
+                    self.runtime.broadcast(subscription::Event::Interaction {
+                        window: self.window,
+                        event,
+                        status,
+                    });
+                }
 
                 let task = self.runtime.enter(|| {
                     Task::batch(
@@ -480,6 +542,10 @@ impl<P: Program + 'static> Emulator<P> {
             mouse::Cursor::Unavailable,
         );
 
+        // Hand the widget-state cache back; taking it without restoring
+        // would poison the next instruction with an unwrap on `None`.
+        self.cache = Some(user_interface.into_cache());
+
         let physical_size = Size::new(
             (self.size.width * scale_factor).round() as u32,
             (self.size.height * scale_factor).round() as u32,
@@ -494,6 +560,41 @@ impl<P: Program + 'static> Emulator<P> {
             size: physical_size,
             scale_factor,
         }
+    }
+
+    /// Runs a widget [`Operation`](widget::Operation) over the current
+    /// widget tree of the [`Emulator`].
+    ///
+    /// This is the emulator counterpart of
+    /// [`UserInterface::operate`]: it lets tests and harnesses inspect
+    /// or mutate widget state (query text, focus inputs, scroll
+    /// scrollables) against the same widget-state cache the emulated
+    /// interactions build up.
+    pub fn operate(&mut self, program: &P, operation: &mut dyn widget::Operation) {
+        let mut user_interface = UserInterface::build(
+            program.view(&self.state, self.window),
+            self.size,
+            self.cache.take().unwrap(),
+            &mut self.renderer,
+        );
+
+        user_interface.operate(&self.renderer, operation);
+
+        self.cache = Some(user_interface.into_cache());
+    }
+
+    /// Returns the current contents of the emulated clipboard.
+    ///
+    /// An [`Emulator`] never touches the system clipboard; reads and
+    /// writes, both the runtime tasks and the widget-level requests,
+    /// are served from this in-memory value.
+    pub fn clipboard(&self) -> Option<&core::clipboard::Content> {
+        self.clipboard.as_ref()
+    }
+
+    /// Replaces the contents of the emulated clipboard.
+    pub fn set_clipboard(&mut self, content: Option<core::clipboard::Content>) {
+        self.clipboard = content;
     }
 
     /// Returns a reference to the state of the [`Emulator`].
@@ -537,5 +638,21 @@ impl fmt::Display for Mode {
             Self::Patient => "Patient",
             Self::Immediate => "Immediate",
         })
+    }
+}
+
+/// Serves a clipboard read request from the emulated clipboard
+/// contents, honoring the requested [`Kind`](core::clipboard::Kind).
+fn read_clipboard(
+    content: Option<&core::clipboard::Content>,
+    kind: core::clipboard::Kind,
+) -> Result<core::clipboard::Content, core::clipboard::Error> {
+    use core::clipboard::{Content, Error, Kind};
+
+    match (content, kind) {
+        (Some(content @ Content::Text(_)), Kind::Text)
+        | (Some(content @ Content::Html(_)), Kind::Html)
+        | (Some(content @ Content::Files(_)), Kind::Files) => Ok(content.clone()),
+        _ => Err(Error::ContentNotAvailable),
     }
 }
