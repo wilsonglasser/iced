@@ -1,5 +1,6 @@
 //! Run your application in a headless runtime.
 use crate::core;
+use crate::core::font;
 use crate::core::mouse;
 use crate::core::renderer;
 use crate::core::shell;
@@ -21,6 +22,7 @@ use crate::runtime::user_interface;
 use crate::runtime::{Task, UserInterface};
 use crate::{Instruction, Selector};
 
+use std::borrow::Cow;
 use std::fmt;
 
 /// A headless runtime that can run iced applications and execute
@@ -88,11 +90,20 @@ impl<P: Program + 'static> Emulator<P> {
 
         let settings = program.settings();
 
+        for font in &settings.fonts {
+            load_font(font.clone()).expect("Font must be valid");
+        }
+
         // TODO: Error handling
         let executor = P::Executor::new().expect("Create emulator executor");
 
+        let backend = std::env::var("ICED_TEST_BACKEND").ok();
+
         let renderer = executor
-            .block_on(P::Renderer::new(renderer::Settings::from(&settings), None))
+            .block_on(P::Renderer::new(
+                renderer::Settings::from(&settings),
+                backend.as_deref(),
+            ))
             .expect("Create emulator renderer");
 
         let runtime = Runtime::new(executor, sender);
@@ -247,40 +258,36 @@ impl<P: Program + 'static> Emulator<P> {
                     // TODO
                     dbg!(action);
                 }
-                runtime::Action::Font(action) => match action {
-                    runtime::font::Action::Load { bytes, channel } => {
-                        // Mirror the winit shell: load into the global
-                        // font system so runtime-loaded fonts (CJK,
-                        // downloadable packs) resolve by family name in
-                        // emulated renders too.
-                        crate::renderer::graphics::text::font_system()
-                            .write()
-                            .expect("Write to font system")
-                            .load_font(bytes);
+                runtime::Action::Font(action) => {
+                    use crate::runtime::font;
 
-                        let _ = channel.send(Ok(()));
+                    match action {
+                        font::Action::Load { bytes, channel } => {
+                            let result = load_font(bytes);
+                            let _ = channel.send(result);
+                        }
+                        font::Action::List { channel } => {
+                            use std::collections::BTreeSet;
+
+                            let font_system =
+                                crate::renderer::graphics::text::font_system()
+                                    .read()
+                                    .expect("Read from font system");
+
+                            let families =
+                                BTreeSet::from_iter(font_system.families());
+
+                            let _ = channel.send(Ok(families
+                                .into_iter()
+                                .map(core::font::Family::name)
+                                .collect()));
+                        }
+                        // Changing the default font requires recreating
+                        // the renderer (see the winit shell); no
+                        // emulated program uses it so far.
+                        font::Action::SetDefaults { .. } => {}
                     }
-                    runtime::font::Action::List { channel } => {
-                        use std::collections::BTreeSet;
-
-                        let font_system =
-                            crate::renderer::graphics::text::font_system()
-                                .read()
-                                .expect("Read from font system");
-
-                        let families =
-                            BTreeSet::from_iter(font_system.families());
-
-                        let _ = channel.send(Ok(families
-                            .into_iter()
-                            .map(core::font::Family::name)
-                            .collect()));
-                    }
-                    // Changing the default font requires recreating the
-                    // renderer (see the winit shell); no emulated
-                    // program uses it so far.
-                    runtime::font::Action::SetDefaults { .. } => {}
-                },
+                }
                 runtime::Action::Image(action) => {
                     // TODO
                     dbg!(action);
@@ -320,7 +327,7 @@ impl<P: Program + 'static> Emulator<P> {
             &mut self.renderer,
         );
 
-        let mut messages = Vec::new();
+        let mut messages = shell::Bus::new();
 
         match instruction {
             Instruction::Interact(interaction) => {
@@ -572,7 +579,7 @@ impl<P: Program + 'static> Emulator<P> {
             ))],
             mouse::Cursor::Unavailable,
             &mut self.renderer,
-            &mut Vec::new(),
+            &mut shell::Bus::new(),
         );
 
         user_interface.draw(
@@ -697,4 +704,13 @@ fn read_clipboard(
         | (Some(content @ Content::Files(_)), Kind::Files) => Ok(content.clone()),
         _ => Err(Error::ContentNotAvailable),
     }
+}
+
+fn load_font(font: Cow<'static, [u8]>) -> Result<(), font::Error> {
+    crate::renderer::graphics::text::font_system()
+        .write()
+        .expect("Write to font system")
+        .load_font(font);
+
+    Ok(())
 }

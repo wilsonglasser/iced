@@ -33,7 +33,7 @@ use crate::{
     Color, Element, Event, Layout, Length, Pixels, Point, Rectangle, Shell, Size, Theme, Widget,
 };
 
-pub use text::{Alignment, Ellipsis, LineHeight, Shaping, Wrapping};
+pub use text::{Alignment, Ellipsis, LineHeight, Position, Shaping, Wrapping};
 
 /// A bunch of text.
 ///
