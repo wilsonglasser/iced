@@ -247,10 +247,40 @@ impl<P: Program + 'static> Emulator<P> {
                     // TODO
                     dbg!(action);
                 }
-                runtime::Action::Font(action) => {
-                    // TODO
-                    dbg!(action);
-                }
+                runtime::Action::Font(action) => match action {
+                    runtime::font::Action::Load { bytes, channel } => {
+                        // Mirror the winit shell: load into the global
+                        // font system so runtime-loaded fonts (CJK,
+                        // downloadable packs) resolve by family name in
+                        // emulated renders too.
+                        crate::renderer::graphics::text::font_system()
+                            .write()
+                            .expect("Write to font system")
+                            .load_font(bytes);
+
+                        let _ = channel.send(Ok(()));
+                    }
+                    runtime::font::Action::List { channel } => {
+                        use std::collections::BTreeSet;
+
+                        let font_system =
+                            crate::renderer::graphics::text::font_system()
+                                .read()
+                                .expect("Read from font system");
+
+                        let families =
+                            BTreeSet::from_iter(font_system.families());
+
+                        let _ = channel.send(Ok(families
+                            .into_iter()
+                            .map(core::font::Family::name)
+                            .collect()));
+                    }
+                    // Changing the default font requires recreating the
+                    // renderer (see the winit shell); no emulated
+                    // program uses it so far.
+                    runtime::font::Action::SetDefaults { .. } => {}
+                },
                 runtime::Action::Image(action) => {
                     // TODO
                     dbg!(action);
