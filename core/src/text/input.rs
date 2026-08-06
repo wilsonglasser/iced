@@ -93,7 +93,22 @@ impl<R: text::Renderer> Input<R> {
                 let value = self.value();
                 let secured = protect(&value, layout.multiline.is_some());
 
-                self.secure = Some(text::Editor::with_text(&secured));
+                let mut secure: R::Editor = text::Editor::with_text(&secured);
+
+                // The mirror drives the cursor from here on, and a fresh
+                // editor starts at the beginning. Carry the caret over, or
+                // flipping a password field back to masked would move it
+                // under the user and leave both editors out of sync.
+                let cursor = self.editor.cursor();
+
+                secure.move_to(editor::Cursor {
+                    position: secure_position(&self.editor, cursor.position),
+                    selection: cursor
+                        .selection
+                        .map(|selection| secure_position(&self.editor, selection)),
+                });
+
+                self.secure = Some(secure);
             }
         } else {
             self.secure = None;
@@ -416,5 +431,25 @@ fn protect(text: &str, is_multiline: bool) -> String {
             .join("\n")
     } else {
         text.graphemes(true).map(|_| SECURE_CHAR).collect()
+    }
+}
+
+/// Maps a [`text::Position`] of the real editor to the equivalent position
+/// in its protected mirror, where every grapheme became a [`SECURE_CHAR`].
+fn secure_position(editor: &impl Editor, position: text::Position) -> text::Position {
+    let Some(line) = editor.line(position.line) else {
+        return text::Position { line: 0, index: 0 };
+    };
+
+    let index = line
+        .text
+        .get(..position.index)
+        .unwrap_or(&line.text)
+        .graphemes(true)
+        .count();
+
+    text::Position {
+        line: position.line,
+        index: index * SECURE_CHAR.len_utf8(),
     }
 }
