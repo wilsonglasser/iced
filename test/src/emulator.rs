@@ -45,6 +45,7 @@ pub struct Emulator<P: Program> {
     cache: Option<user_interface::Cache>,
     pending_tasks: usize,
     clipboard: Option<core::clipboard::Content>,
+    clipboard_primary: Option<core::clipboard::Content>,
 }
 
 /// An emulation event.
@@ -127,6 +128,7 @@ impl<P: Program + 'static> Emulator<P> {
             cache: Some(user_interface::Cache::default()),
             pending_tasks: 0,
             clipboard: None,
+            clipboard_primary: None,
         };
 
         emulator.resubscribe(program);
@@ -210,11 +212,20 @@ impl<P: Program + 'static> Emulator<P> {
                     use crate::runtime::clipboard;
 
                     match action {
-                        clipboard::Action::Read { kind, channel } => {
-                            let _ = channel.send(read_clipboard(self.clipboard.as_ref(), kind));
+                        clipboard::Action::Read {
+                            clipboard_kind,
+                            kind,
+                            channel,
+                        } => {
+                            let _ = channel
+                                .send(read_clipboard(self.slot(clipboard_kind).as_ref(), kind));
                         }
-                        clipboard::Action::Write { content, channel } => {
-                            self.clipboard = Some(content);
+                        clipboard::Action::Write {
+                            clipboard_kind,
+                            content,
+                            channel,
+                        } => {
+                            *self.slot_mut(clipboard_kind) = Some(content);
                             let _ = channel.send(Ok(()));
                         }
                     }
@@ -410,17 +421,27 @@ impl<P: Program + 'static> Emulator<P> {
                         ..
                     } = state
                     {
-                        for kind in requests.reads {
+                        for (clipboard_kind, kind) in requests.reads {
                             clipboard_events.push(core::Event::Clipboard(
                                 core::clipboard::Event::Read(
-                                    read_clipboard(self.clipboard.as_ref(), kind)
+                                    read_clipboard(self.slot(clipboard_kind).as_ref(), kind)
                                         .map(std::sync::Arc::new),
                                 ),
                             ));
                         }
 
-                        if let Some(content) = requests.write {
-                            self.clipboard = Some(content);
+                        if let Some((clipboard_kind, content)) = requests.write {
+                            // Field access, not `slot_mut`: the live view
+                            // still borrows `self.state` here, so only a
+                            // disjoint field borrow is allowed.
+                            match clipboard_kind {
+                                core::clipboard::ClipboardKind::Standard => {
+                                    self.clipboard = Some(content);
+                                }
+                                core::clipboard::ClipboardKind::Primary => {
+                                    self.clipboard_primary = Some(content);
+                                }
+                            }
 
                             clipboard_events.push(core::Event::Clipboard(
                                 core::clipboard::Event::Written(Ok(())),
@@ -644,6 +665,36 @@ impl<P: Program + 'static> Emulator<P> {
     /// Replaces the contents of the emulated clipboard.
     pub fn set_clipboard(&mut self, content: Option<core::clipboard::Content>) {
         self.clipboard = content;
+    }
+
+    /// Returns the current contents of the emulated primary clipboard
+    /// (the X11 / Wayland selection).
+    pub fn clipboard_primary(&self) -> Option<&core::clipboard::Content> {
+        self.clipboard_primary.as_ref()
+    }
+
+    /// Replaces the contents of the emulated primary clipboard.
+    pub fn set_clipboard_primary(&mut self, content: Option<core::clipboard::Content>) {
+        self.clipboard_primary = content;
+    }
+
+    /// The emulated buffer backing the given clipboard kind. The two are
+    /// kept apart so a test can't see a primary write as a standard one.
+    fn slot(&self, kind: core::clipboard::ClipboardKind) -> &Option<core::clipboard::Content> {
+        match kind {
+            core::clipboard::ClipboardKind::Standard => &self.clipboard,
+            core::clipboard::ClipboardKind::Primary => &self.clipboard_primary,
+        }
+    }
+
+    fn slot_mut(
+        &mut self,
+        kind: core::clipboard::ClipboardKind,
+    ) -> &mut Option<core::clipboard::Content> {
+        match kind {
+            core::clipboard::ClipboardKind::Standard => &mut self.clipboard,
+            core::clipboard::ClipboardKind::Primary => &mut self.clipboard_primary,
+        }
     }
 
     /// Returns a reference to the state of the [`Emulator`].
