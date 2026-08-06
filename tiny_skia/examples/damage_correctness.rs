@@ -173,7 +173,7 @@ fn paint(renderer: &mut Renderer, scene: &Scene) {
 
 fn main() {
     let bounds = Rectangle::with_size(Size::new(WIDTH as f32, HEIGHT as f32));
-    let viewport = Viewport::with_physical_size(Size::new(WIDTH, HEIGHT), 1.0);
+    let viewport = Viewport::with_physical_size(Size::new(WIDTH, HEIGHT), renderer::Scale::default());
     let background = Color::from_rgb(0.05, 0.05, 0.06);
 
     // Incremental world: persistent renderer + buffer, partial draws.

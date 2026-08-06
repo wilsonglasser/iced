@@ -61,7 +61,7 @@ fn main() {
 /// screen).
 fn run_workload(unique_content: bool) -> f64 {
     let mut renderer = Renderer::new(renderer::Settings::default());
-    let viewport = Viewport::with_physical_size(Size::new(WIDTH, HEIGHT), 1.0);
+    let viewport = Viewport::with_physical_size(Size::new(WIDTH, HEIGHT), renderer::Scale::default());
     let bounds = Rectangle::with_size(Size::new(WIDTH as f32, HEIGHT as f32));
 
     let mut buffer = vec![0_u8; (WIDTH * HEIGHT * 4) as usize];
