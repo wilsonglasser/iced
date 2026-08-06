@@ -339,6 +339,7 @@ where
 struct Memory {
     action: state::Action,
     order: Vec<Pane>,
+    hovered: Option<Pane>,
 }
 
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -467,7 +468,9 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        let Memory { action, .. } = tree.state.downcast_mut();
+        let Memory {
+            action, hovered, ..
+        } = tree.state.downcast_mut();
         let node = self.internal.layout();
 
         let on_drag = if self.drag_enabled() {
@@ -626,6 +629,25 @@ where
                         }
                     } else if action.picked_pane().is_some() {
                         shell.request_redraw();
+                    } else {
+                        let new_hovered = self
+                            .panes
+                            .iter()
+                            .copied()
+                            .zip(layout.children())
+                            .filter(|(pane, _)| {
+                                self.internal
+                                    .maximized()
+                                    .is_none_or(|maximized| maximized == *pane)
+                            })
+                            .find_map(|(pane, layout)| {
+                                cursor.is_over(layout.bounds()).then_some(pane)
+                            });
+
+                        if *hovered != new_hovered {
+                            *hovered = new_hovered;
+                            shell.request_redraw();
+                        }
                     }
                 }
             }
@@ -711,7 +733,9 @@ where
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        let Memory { action, .. } = tree.state.downcast_ref();
+        let Memory {
+            action, hovered, ..
+        } = tree.state.downcast_ref();
         let node = self.internal.layout();
         let resize_leeway = self.on_resize.as_ref().map(|(leeway, _)| *leeway);
 
@@ -790,6 +814,7 @@ where
                         pane_layout,
                         pane_cursor,
                         viewport,
+                        Some(id) == *hovered,
                     );
 
                     if let Some(cursor_position) = cursor.position()
@@ -818,6 +843,7 @@ where
                         pane_layout,
                         pane_cursor,
                         viewport,
+                        Some(id) == *hovered,
                     );
                 }
             }
@@ -965,6 +991,10 @@ where
                 self.layout,
                 mouse::Cursor::Unavailable,
                 &Rectangle::INFINITE,
+                // The dragged pane travels with an unavailable cursor, so
+                // its controls stayed hidden when the flag was derived from
+                // `cursor.is_over` inside `draw`. Keep that.
+                false,
             );
         });
     }
