@@ -782,8 +782,14 @@ mod parser {
     }
 
     fn mouse_button(input: &str) -> IResult<&str, mouse::Button> {
+        // Every name the formatter emits parses back, or a recorded
+        // interaction would fail to replay. `Other(n)` is the exception:
+        // it formats without its number, so it never round-tripped.
         alt((
             tag("right").map(|_| mouse::Button::Right),
+            tag("middle").map(|_| mouse::Button::Middle),
+            tag("back").map(|_| mouse::Button::Back),
+            tag("forward").map(|_| mouse::Button::Forward),
             success(mouse::Button::Left),
         ))
         .parse(input)
@@ -1071,6 +1077,21 @@ mod tests {
         );
 
         roundtrip("click right \"Host\"");
+    }
+
+    #[test]
+    fn it_parses_every_button_the_formatter_emits() {
+        assert_eq!(
+            parse("click middle (10, 20)"),
+            Instruction::Interact(Interaction::Mouse(Mouse::Click {
+                button: mouse::Button::Middle,
+                target: Some(Target::Point(Point::new(10.0, 20.0))),
+            }))
+        );
+
+        roundtrip("click middle (10.00, 20.00)");
+        roundtrip("click back \"Files\"");
+        roundtrip("click forward \"Files\"");
     }
 
     #[test]
