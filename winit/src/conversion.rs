@@ -11,12 +11,17 @@ use crate::core::window;
 use crate::core::{Event, Point, Size};
 
 /// Converts some [`window::Settings`] into some `WindowAttributes` from `winit`.
+///
+/// `event_loop` is only read on Linux, where a single binary serves both X11 and Wayland but
+/// `winit 0.31` accepts the platform attributes of exactly ONE backend; see below.
 pub fn window_attributes(
     settings: window::Settings,
     title: &str,
     scale_factor: f32,
     primary_monitor: Option<winit::monitor::MonitorHandle>,
     _id: Option<String>,
+    #[cfg_attr(not(target_os = "linux"), expect(unused_variables))]
+    event_loop: &dyn winit::event_loop::ActiveEventLoop,
 ) -> winit::window::WindowAttributes {
     let mut attributes = winit::window::WindowAttributes::default();
 
@@ -36,7 +41,7 @@ pub fn window_attributes(
 
     attributes = attributes
         .with_title(title)
-        .with_inner_size(winit::dpi::LogicalSize {
+        .with_surface_size(winit::dpi::LogicalSize {
             width: settings.size.width * scale_factor,
             height: settings.size.height * scale_factor,
         })
@@ -44,7 +49,7 @@ pub fn window_attributes(
         .with_fullscreen(
             settings
                 .fullscreen
-                .then_some(winit::window::Fullscreen::Borderless(None)),
+                .then_some(winit::monitor::Fullscreen::Borderless(None)),
         )
         .with_resizable(settings.resizable)
         .with_enabled_buttons(buttons)
@@ -60,14 +65,14 @@ pub fn window_attributes(
     }
 
     if let Some(min_size) = settings.min_size {
-        attributes = attributes.with_min_inner_size(winit::dpi::LogicalSize {
+        attributes = attributes.with_min_surface_size(winit::dpi::LogicalSize {
             width: min_size.width,
             height: min_size.height,
         });
     }
 
     if let Some(max_size) = settings.max_size {
-        attributes = attributes.with_max_inner_size(winit::dpi::LogicalSize {
+        attributes = attributes.with_max_surface_size(winit::dpi::LogicalSize {
             width: max_size.width,
             height: max_size.height,
         });
@@ -87,62 +92,80 @@ pub fn window_attributes(
         }
     }
 
+    // In `winit 0.31` the per-platform extension TRAITS on `WindowAttributes` became per-platform
+    // STRUCTS, handed over as one boxed `PlatformWindowAttributes`. The backend downcasts it and
+    // silently falls back to its own default when the type is not its own, which is why Linux has
+    // to pick between X11 and Wayland at RUNTIME rather than setting both.
     #[cfg(target_os = "windows")]
     {
         use window::settings::platform;
-        use winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
+        use winit::platform::windows::{CornerPreference, WindowAttributesWindows};
 
-        attributes = attributes.with_drag_and_drop(settings.platform_specific.drag_and_drop);
-
-        attributes = attributes.with_skip_taskbar(settings.platform_specific.skip_taskbar);
-
-        attributes =
-            attributes.with_undecorated_shadow(settings.platform_specific.undecorated_shadow);
-
-        attributes =
-            attributes.with_corner_preference(match settings.platform_specific.corner_preference {
-                platform::CornerPreference::Default => CornerPreference::Default,
-                platform::CornerPreference::DoNotRound => CornerPreference::DoNotRound,
-                platform::CornerPreference::Round => CornerPreference::Round,
-                platform::CornerPreference::RoundSmall => CornerPreference::RoundSmall,
-            });
-
-        attributes =
-            attributes.with_taskbar_icon(settings.platform_specific.taskbar_icon.and_then(icon));
+        attributes = attributes.with_platform_attributes(Box::new(
+            WindowAttributesWindows::default()
+                .with_drag_and_drop(settings.platform_specific.drag_and_drop)
+                .with_skip_taskbar(settings.platform_specific.skip_taskbar)
+                .with_undecorated_shadow(settings.platform_specific.undecorated_shadow)
+                .with_corner_preference(match settings.platform_specific.corner_preference {
+                    platform::CornerPreference::Default => CornerPreference::Default,
+                    platform::CornerPreference::DoNotRound => CornerPreference::DoNotRound,
+                    platform::CornerPreference::Round => CornerPreference::Round,
+                    platform::CornerPreference::RoundSmall => CornerPreference::RoundSmall,
+                })
+                .with_taskbar_icon(settings.platform_specific.taskbar_icon.and_then(icon)),
+        ));
     }
 
     #[cfg(target_os = "macos")]
     {
-        use winit::platform::macos::WindowAttributesExtMacOS;
+        use winit::platform::macos::WindowAttributesMacOS;
 
-        attributes = attributes
-            .with_title_hidden(settings.platform_specific.title_hidden)
-            .with_titlebar_transparent(settings.platform_specific.titlebar_transparent)
-            .with_fullsize_content_view(settings.platform_specific.fullsize_content_view);
+        attributes = attributes.with_platform_attributes(Box::new(
+            WindowAttributesMacOS::default()
+                .with_title_hidden(settings.platform_specific.title_hidden)
+                .with_titlebar_transparent(settings.platform_specific.titlebar_transparent)
+                .with_fullsize_content_view(settings.platform_specific.fullsize_content_view),
+        ));
     }
 
     #[cfg(target_os = "linux")]
     {
-        #[cfg(feature = "x11")]
-        {
-            use winit::platform::x11::WindowAttributesExtX11;
-
-            attributes = attributes
-                .with_override_redirect(settings.platform_specific.override_redirect)
-                .with_name(
-                    &settings.platform_specific.application_id,
-                    &settings.platform_specific.application_id,
-                );
-        }
         #[cfg(feature = "wayland")]
-        {
-            use winit::platform::wayland::WindowAttributesExtWayland;
+        let is_wayland = {
+            use winit::platform::wayland::ActiveEventLoopExtWayland;
+            event_loop.is_wayland()
+        };
 
-            attributes = attributes.with_name(
-                &settings.platform_specific.application_id,
-                &settings.platform_specific.application_id,
-            );
+        #[cfg(not(feature = "wayland"))]
+        let is_wayland = false;
+
+        #[cfg(feature = "wayland")]
+        if is_wayland {
+            use winit::platform::wayland::WindowAttributesWayland;
+
+            attributes = attributes.with_platform_attributes(Box::new(
+                WindowAttributesWayland::default().with_name(
+                    &settings.platform_specific.application_id,
+                    &settings.platform_specific.application_id,
+                ),
+            ));
         }
+
+        #[cfg(feature = "x11")]
+        if !is_wayland {
+            use winit::platform::x11::WindowAttributesX11;
+
+            attributes = attributes.with_platform_attributes(Box::new(
+                WindowAttributesX11::default()
+                    .with_override_redirect(settings.platform_specific.override_redirect)
+                    .with_name(
+                        &settings.platform_specific.application_id,
+                        &settings.platform_specific.application_id,
+                    ),
+            ));
+        }
+
+        let _ = is_wayland;
     }
 
     attributes
@@ -158,7 +181,7 @@ pub fn window_event(
     use winit::event::WindowEvent;
 
     match event {
-        WindowEvent::Resized(new_size) => {
+        WindowEvent::SurfaceResized(new_size) => {
             let logical_size = new_size.to_logical(f64::from(scale_factor));
 
             Some(Event::Window(window::Event::Resized(Size {
@@ -167,16 +190,55 @@ pub fn window_event(
             })))
         }
         WindowEvent::CloseRequested => Some(Event::Window(window::Event::CloseRequested)),
-        WindowEvent::CursorMoved { position, .. } => {
-            let position = position.to_logical::<f64>(f64::from(scale_factor));
 
-            Some(Event::Mouse(mouse::Event::CursorMoved {
-                position: Point::new(position.x as f32, position.y as f32),
-            }))
+        // `winit 0.31` folded touch into the pointer events, so the same four variants now carry
+        // both a mouse and a finger and the source is what separates them. iced keeps
+        // `Event::Mouse` and `Event::Touch` apart, so the split happens here instead.
+        WindowEvent::PointerMoved {
+            position, source, ..
+        } => {
+            let point = logical_point(position, scale_factor);
+
+            Some(match source {
+                winit::event::PointerSource::Touch { finger_id, .. } => {
+                    Event::Touch(touch::Event::FingerMoved {
+                        id: finger(finger_id),
+                        position: point,
+                    })
+                }
+                _ => Event::Mouse(mouse::Event::CursorMoved { position: point }),
+            })
         }
-        WindowEvent::CursorEntered { .. } => Some(Event::Mouse(mouse::Event::CursorEntered)),
-        WindowEvent::CursorLeft { .. } => Some(Event::Mouse(mouse::Event::CursorLeft)),
-        WindowEvent::MouseInput { button, state, .. } => {
+        WindowEvent::PointerEntered { position, kind, .. } => Some(match kind {
+            // A finger entering the surface IS the press; `PointerButton` reports the same touch
+            // right after, and honouring both would double every tap.
+            winit::event::PointerKind::Touch(finger_id) => {
+                Event::Touch(touch::Event::FingerPressed {
+                    id: finger(finger_id),
+                    position: logical_point(position, scale_factor),
+                })
+            }
+            _ => Event::Mouse(mouse::Event::CursorEntered),
+        }),
+        WindowEvent::PointerLeft { position, kind, .. } => Some(match kind {
+            winit::event::PointerKind::Touch(finger_id) => {
+                // `winit 0.31` no longer distinguishes a lifted finger from a cancelled one, so
+                // `touch::Event::FingerLost` has become unreachable; a cancelled touch now reads
+                // as a lift. It also may not report where it left, and a lift with no position is
+                // not expressible in iced.
+                Event::Touch(touch::Event::FingerLifted {
+                    id: finger(finger_id),
+                    position: logical_point(position?, scale_factor),
+                })
+            }
+            _ => Event::Mouse(mouse::Event::CursorLeft),
+        }),
+        WindowEvent::PointerButton { button, state, .. } => {
+            // Touch presses already arrived as `PointerEntered` / `PointerLeft`.
+            let winit::event::ButtonSource::Mouse(button) = button else {
+                return None;
+            };
+
             let button = mouse_button(button);
 
             Some(Event::Mouse(match state {
@@ -201,38 +263,16 @@ pub fn window_event(
                     },
                 }))
             }
+            // `MouseScrollDelta` is `#[non_exhaustive]` since `winit 0.31`.
+            _ => None,
         },
         // Ignore keyboard presses/releases during window focus/unfocus
         WindowEvent::KeyboardInput { is_synthetic, .. } if is_synthetic => None,
         WindowEvent::KeyboardInput { event, .. } => Some(Event::Keyboard({
-            let key = {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-                    event.key_without_modifiers()
-                }
-
-                #[cfg(target_arch = "wasm32")]
-                {
-                    // TODO: Fix inconsistent API on Wasm
-                    event.logical_key.clone()
-                }
-            };
+            let key = event.key_without_modifiers.clone();
 
             let text = {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    use crate::core::SmolStr;
-                    use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
-
-                    event.text_with_all_modifiers().map(SmolStr::new)
-                }
-
-                #[cfg(target_arch = "wasm32")]
-                {
-                    // TODO: Fix inconsistent API on Wasm
-                    event.text
-                }
+                event.text_with_all_modifiers.clone()
             }
             .filter(|text| !text.as_str().chars().any(is_private_use));
 
@@ -286,20 +326,19 @@ pub fn window_event(
             }
             Ime::Commit(content) => input_method::Event::Commit(content),
             Ime::Disabled => input_method::Event::Closed,
+            // `Ime` is `#[non_exhaustive]` since `winit 0.31`.
+            _ => return None,
         })),
         WindowEvent::Focused(focused) => Some(Event::Window(if focused {
             window::Event::Focused
         } else {
             window::Event::Unfocused
         })),
-        WindowEvent::HoveredFile(path) => {
-            Some(Event::Window(window::Event::FileHovered(path.clone())))
-        }
-        WindowEvent::DroppedFile(path) => {
-            Some(Event::Window(window::Event::FileDropped(path.clone())))
-        }
-        WindowEvent::HoveredFileCancelled => Some(Event::Window(window::Event::FilesHoveredLeft)),
-        WindowEvent::Touch(touch) => Some(Event::Touch(touch_event(touch, scale_factor))),
+        // `DragEntered` / `DragDropped` / `DataTransferReceived` are NOT handled here. The paths no
+        // longer ride the event: `winit 0.31` only hands over a `DataTransferId` and the contents
+        // have to be fetched asynchronously, which a pure conversion cannot do. `run_instance`
+        // owns that round trip and emits `window::Event::File*` itself.
+        WindowEvent::DragLeft { .. } => Some(Event::Window(window::Event::FilesHoveredLeft)),
         WindowEvent::Moved(position) => {
             let winit::dpi::LogicalPosition { x, y } = position.to_logical(f64::from(scale_factor));
 
@@ -341,10 +380,10 @@ pub fn position(
         }
         window::Position::SpecificWith(to_position) => {
             if let Some(monitor) = monitor {
-                let start = monitor.position();
+                let start = monitor.position()?;
 
                 let resolution: winit::dpi::LogicalSize<f32> =
-                    monitor.size().to_logical(monitor.scale_factor());
+                    monitor.current_video_mode()?.size().to_logical(monitor.scale_factor());
 
                 let position = to_position(size, Size::new(resolution.width, resolution.height));
 
@@ -366,10 +405,10 @@ pub fn position(
         }
         window::Position::Centered => {
             if let Some(monitor) = monitor {
-                let start = monitor.position();
+                let start = monitor.position()?;
 
                 let resolution: winit::dpi::LogicalSize<f64> =
-                    monitor.size().to_logical(monitor.scale_factor());
+                    monitor.current_video_mode()?.size().to_logical(monitor.scale_factor());
 
                 let centered: winit::dpi::PhysicalPosition<i32> = winit::dpi::LogicalPosition {
                     x: (resolution.width - f64::from(size.width)) / 2.0,
@@ -396,10 +435,10 @@ pub fn position(
 pub fn fullscreen(
     monitor: Option<winit::monitor::MonitorHandle>,
     mode: window::Mode,
-) -> Option<winit::window::Fullscreen> {
+) -> Option<winit::monitor::Fullscreen> {
     match mode {
         window::Mode::Windowed | window::Mode::Hidden => None,
-        window::Mode::Fullscreen => Some(winit::window::Fullscreen::Borderless(monitor)),
+        window::Mode::Fullscreen => Some(winit::monitor::Fullscreen::Borderless(monitor)),
     }
 }
 
@@ -414,7 +453,7 @@ pub fn visible(mode: window::Mode) -> bool {
 /// Converts a [`winit`] fullscreen mode into a [`window::Mode`].
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
-pub fn mode(mode: Option<winit::window::Fullscreen>) -> window::Mode {
+pub fn mode(mode: Option<winit::monitor::Fullscreen>) -> window::Mode {
     match mode {
         None => window::Mode::Windowed,
         Some(_) => window::Mode::Fullscreen,
@@ -445,38 +484,38 @@ pub fn window_theme(mode: theme::Mode) -> Option<winit::window::Theme> {
 /// Converts a [`mouse::Interaction`] into a [`winit`] cursor icon.
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
-pub fn mouse_interaction(interaction: mouse::Interaction) -> Option<winit::window::CursorIcon> {
+pub fn mouse_interaction(interaction: mouse::Interaction) -> Option<winit::cursor::CursorIcon> {
     use mouse::Interaction;
 
     let icon = match interaction {
         Interaction::Hidden => {
             return None;
         }
-        Interaction::None | Interaction::Idle => winit::window::CursorIcon::Default,
-        Interaction::ContextMenu => winit::window::CursorIcon::ContextMenu,
-        Interaction::Help => winit::window::CursorIcon::Help,
-        Interaction::Pointer => winit::window::CursorIcon::Pointer,
-        Interaction::Progress => winit::window::CursorIcon::Progress,
-        Interaction::Wait => winit::window::CursorIcon::Wait,
-        Interaction::Cell => winit::window::CursorIcon::Cell,
-        Interaction::Crosshair => winit::window::CursorIcon::Crosshair,
-        Interaction::Text => winit::window::CursorIcon::Text,
-        Interaction::Alias => winit::window::CursorIcon::Alias,
-        Interaction::Copy => winit::window::CursorIcon::Copy,
-        Interaction::Move => winit::window::CursorIcon::Move,
-        Interaction::NoDrop => winit::window::CursorIcon::NoDrop,
-        Interaction::NotAllowed => winit::window::CursorIcon::NotAllowed,
-        Interaction::Grab => winit::window::CursorIcon::Grab,
-        Interaction::Grabbing => winit::window::CursorIcon::Grabbing,
-        Interaction::ResizingHorizontally => winit::window::CursorIcon::EwResize,
-        Interaction::ResizingVertically => winit::window::CursorIcon::NsResize,
-        Interaction::ResizingDiagonallyUp => winit::window::CursorIcon::NeswResize,
-        Interaction::ResizingDiagonallyDown => winit::window::CursorIcon::NwseResize,
-        Interaction::ResizingColumn => winit::window::CursorIcon::ColResize,
-        Interaction::ResizingRow => winit::window::CursorIcon::RowResize,
-        Interaction::AllScroll => winit::window::CursorIcon::AllScroll,
-        Interaction::ZoomIn => winit::window::CursorIcon::ZoomIn,
-        Interaction::ZoomOut => winit::window::CursorIcon::ZoomOut,
+        Interaction::None | Interaction::Idle => winit::cursor::CursorIcon::Default,
+        Interaction::ContextMenu => winit::cursor::CursorIcon::ContextMenu,
+        Interaction::Help => winit::cursor::CursorIcon::Help,
+        Interaction::Pointer => winit::cursor::CursorIcon::Pointer,
+        Interaction::Progress => winit::cursor::CursorIcon::Progress,
+        Interaction::Wait => winit::cursor::CursorIcon::Wait,
+        Interaction::Cell => winit::cursor::CursorIcon::Cell,
+        Interaction::Crosshair => winit::cursor::CursorIcon::Crosshair,
+        Interaction::Text => winit::cursor::CursorIcon::Text,
+        Interaction::Alias => winit::cursor::CursorIcon::Alias,
+        Interaction::Copy => winit::cursor::CursorIcon::Copy,
+        Interaction::Move => winit::cursor::CursorIcon::Move,
+        Interaction::NoDrop => winit::cursor::CursorIcon::NoDrop,
+        Interaction::NotAllowed => winit::cursor::CursorIcon::NotAllowed,
+        Interaction::Grab => winit::cursor::CursorIcon::Grab,
+        Interaction::Grabbing => winit::cursor::CursorIcon::Grabbing,
+        Interaction::ResizingHorizontally => winit::cursor::CursorIcon::EwResize,
+        Interaction::ResizingVertically => winit::cursor::CursorIcon::NsResize,
+        Interaction::ResizingDiagonallyUp => winit::cursor::CursorIcon::NeswResize,
+        Interaction::ResizingDiagonallyDown => winit::cursor::CursorIcon::NwseResize,
+        Interaction::ResizingColumn => winit::cursor::CursorIcon::ColResize,
+        Interaction::ResizingRow => winit::cursor::CursorIcon::RowResize,
+        Interaction::AllScroll => winit::cursor::CursorIcon::AllScroll,
+        Interaction::ZoomIn => winit::cursor::CursorIcon::ZoomIn,
+        Interaction::ZoomOut => winit::cursor::CursorIcon::ZoomOut,
     };
 
     Some(icon)
@@ -493,7 +532,7 @@ pub fn mouse_button(mouse_button: winit::event::MouseButton) -> mouse::Button {
         winit::event::MouseButton::Middle => mouse::Button::Middle,
         winit::event::MouseButton::Back => mouse::Button::Back,
         winit::event::MouseButton::Forward => mouse::Button::Forward,
-        winit::event::MouseButton::Other(other) => mouse::Button::Other(other),
+        other => mouse::Button::Other(other as u16),
     }
 }
 
@@ -508,7 +547,7 @@ pub fn modifiers(modifiers: winit::keyboard::ModifiersState) -> keyboard::Modifi
     result.set(keyboard::Modifiers::SHIFT, modifiers.shift_key());
     result.set(keyboard::Modifiers::CTRL, modifiers.control_key());
     result.set(keyboard::Modifiers::ALT, modifiers.alt_key());
-    result.set(keyboard::Modifiers::LOGO, modifiers.super_key());
+    result.set(keyboard::Modifiers::LOGO, modifiers.meta_key());
 
     result
 }
@@ -520,30 +559,31 @@ pub fn cursor_position(position: winit::dpi::PhysicalPosition<f64>, scale_factor
     Point::new(logical_position.x, logical_position.y)
 }
 
-/// Converts a `Touch` from [`winit`] to an [`iced`] touch event.
+/// Converts a `FingerId` from [`winit`] to an [`iced`] finger.
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 /// [`iced`]: https://github.com/iced-rs/iced/tree/0.12
-pub fn touch_event(touch: winit::event::Touch, scale_factor: f32) -> touch::Event {
-    let id = touch::Finger(touch.id);
-    let position = {
-        let location = touch.location.to_logical::<f64>(f64::from(scale_factor));
+pub fn finger(id: winit::event::FingerId) -> touch::Finger {
+    touch::Finger(id.into_raw() as u64)
+}
 
-        Point::new(location.x as f32, location.y as f32)
-    };
+/// Converts a physical position from [`winit`] into a logical [`Point`].
+///
+/// [`winit`]: https://github.com/rust-windowing/winit
+fn logical_point(position: winit::dpi::PhysicalPosition<f64>, scale_factor: f32) -> Point {
+    let position = position.to_logical::<f64>(f64::from(scale_factor));
 
-    match touch.phase {
-        winit::event::TouchPhase::Started => touch::Event::FingerPressed { id, position },
-        winit::event::TouchPhase::Moved => touch::Event::FingerMoved { id, position },
-        winit::event::TouchPhase::Ended => touch::Event::FingerLifted { id, position },
-        winit::event::TouchPhase::Cancelled => touch::Event::FingerLost { id, position },
-    }
+    Point::new(position.x as f32, position.y as f32)
 }
 
 /// Converts a `Key` from [`winit`] to an [`iced`] key.
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 /// [`iced`]: https://github.com/iced-rs/iced/tree/0.12
+// `winit 0.31` deprecated `Hyper` / `Super` / `Turbo` in favour of `Meta`, following the W3C
+// spec, but it still emits them and iced still exposes them, so dropping the mapping would lose
+// keys rather than modernize anything.
+#[expect(deprecated)]
 pub fn key(key: winit::keyboard::Key) -> keyboard::Key {
     use keyboard::key::Named;
     use winit::keyboard::NamedKey;
@@ -567,7 +607,6 @@ pub fn key(key: winit::keyboard::Key) -> keyboard::Key {
             NamedKey::Super => Named::Super,
             NamedKey::Enter => Named::Enter,
             NamedKey::Tab => Named::Tab,
-            NamedKey::Space => Named::Space,
             NamedKey::ArrowDown => Named::ArrowDown,
             NamedKey::ArrowLeft => Named::ArrowLeft,
             NamedKey::ArrowRight => Named::ArrowRight,
@@ -884,6 +923,10 @@ pub fn physical_key(physical_key: winit::keyboard::PhysicalKey) -> keyboard::key
 ///
 /// [`winit`]: https://github.com/rust-windowing/winit
 /// [`iced`]: https://github.com/iced-rs/iced/tree/0.12
+// `winit 0.31` deprecated `Hyper` / `Super` / `Turbo` in favour of `Meta`, following the W3C
+// spec, but it still emits them and iced still exposes them, so dropping the mapping would lose
+// keys rather than modernize anything.
+#[expect(deprecated)]
 pub fn key_code(key_code: winit::keyboard::KeyCode) -> Option<keyboard::key::Code> {
     use winit::keyboard::KeyCode;
 
@@ -946,8 +989,8 @@ pub fn key_code(key_code: winit::keyboard::KeyCode) -> Option<keyboard::key::Cod
         KeyCode::ControlLeft => keyboard::key::Code::ControlLeft,
         KeyCode::ControlRight => keyboard::key::Code::ControlRight,
         KeyCode::Enter => keyboard::key::Code::Enter,
-        KeyCode::SuperLeft => keyboard::key::Code::SuperLeft,
-        KeyCode::SuperRight => keyboard::key::Code::SuperRight,
+        KeyCode::MetaLeft => keyboard::key::Code::SuperLeft,
+        KeyCode::MetaRight => keyboard::key::Code::SuperRight,
         KeyCode::ShiftLeft => keyboard::key::Code::ShiftLeft,
         KeyCode::ShiftRight => keyboard::key::Code::ShiftRight,
         KeyCode::Space => keyboard::key::Code::Space,
@@ -1030,7 +1073,6 @@ pub fn key_code(key_code: winit::keyboard::KeyCode) -> Option<keyboard::key::Cod
         KeyCode::AudioVolumeMute => keyboard::key::Code::AudioVolumeMute,
         KeyCode::AudioVolumeUp => keyboard::key::Code::AudioVolumeUp,
         KeyCode::WakeUp => keyboard::key::Code::WakeUp,
-        KeyCode::Meta => keyboard::key::Code::Meta,
         KeyCode::Hyper => keyboard::key::Code::Hyper,
         KeyCode::Turbo => keyboard::key::Code::Turbo,
         KeyCode::Abort => keyboard::key::Code::Abort,
@@ -1101,6 +1143,8 @@ pub fn native_key_code(
         NativeKeyCode::MacOS(code) => keyboard::key::NativeCode::MacOS(code),
         NativeKeyCode::Windows(code) => keyboard::key::NativeCode::Windows(code),
         NativeKeyCode::Xkb(code) => keyboard::key::NativeCode::Xkb(code),
+        // `NativeKeyCode` is `#[non_exhaustive]` since `winit 0.31`.
+        _ => keyboard::key::NativeCode::Unidentified,
     }
 }
 
@@ -1131,10 +1175,12 @@ pub fn resize_direction(resize_direction: window::Direction) -> winit::window::R
 /// Converts some [`window::Icon`] into its `winit` counterpart.
 ///
 /// Returns `None` if there is an error during the conversion.
-pub fn icon(icon: window::Icon) -> Option<winit::window::Icon> {
+pub fn icon(icon: window::Icon) -> Option<winit::icon::Icon> {
     let (pixels, size) = icon.into_raw();
 
-    winit::window::Icon::from_rgba(pixels, size.width, size.height).ok()
+    let rgba = winit::icon::RgbaIcon::new(pixels, size.width, size.height).ok()?;
+
+    Some(winit::icon::Icon(std::sync::Arc::new(rgba)))
 }
 
 /// Converts some [`input_method::Purpose`] into its `winit` counterpart.

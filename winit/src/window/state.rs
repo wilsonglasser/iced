@@ -5,7 +5,7 @@ use crate::core::{mouse, theme, window};
 use crate::graphics::Viewport;
 use crate::program::{self, Program};
 
-use winit::event::{Touch, WindowEvent};
+use winit::event::WindowEvent;
 use winit::window::Window;
 
 use std::fmt::{Debug, Formatter};
@@ -48,7 +48,7 @@ where
     pub fn new(
         program: &program::Instance<P>,
         window_id: window::Id,
-        window: &Window,
+        window: &dyn Window,
         system_theme: theme::Mode,
     ) -> Self {
         let title = program.title(window_id);
@@ -59,7 +59,7 @@ where
         let style = program.style(theme.as_ref().unwrap_or(&default_theme));
 
         let viewport = {
-            let physical_size = window.inner_size();
+            let physical_size = window.surface_size();
 
             Viewport::with_physical_size(
                 Size::new(physical_size.width, physical_size.height),
@@ -136,9 +136,9 @@ where
         self.style.text_color
     }
 
-    pub fn update(&mut self, program: &program::Instance<P>, window: &Window, event: &WindowEvent) {
+    pub fn update(&mut self, program: &program::Instance<P>, window: &dyn Window, event: &WindowEvent) {
         match event {
-            WindowEvent::Resized(new_size) => {
+            WindowEvent::SurfaceResized(new_size) => {
                 let size = Size::new(new_size.width, new_size.height);
 
                 self.viewport = Viewport::with_physical_size(
@@ -165,13 +165,13 @@ where
                 );
                 self.surface_version += 1;
             }
-            WindowEvent::CursorMoved { position, .. }
-            | WindowEvent::Touch(Touch {
-                location: position, ..
-            }) => {
+            // `winit 0.31` folded the cursor and the touch events into one pointer family, so a
+            // finger and a mouse both arrive here; `source` is what tells them apart, and neither
+            // needs to.
+            WindowEvent::PointerMoved { position, .. } => {
                 self.cursor_position = Some(*position);
             }
-            WindowEvent::CursorLeft { .. } => {
+            WindowEvent::PointerLeft { .. } => {
                 self.cursor_position = None;
             }
             WindowEvent::ModifiersChanged(new_modifiers) => {
@@ -194,7 +194,7 @@ where
         &mut self,
         program: &program::Instance<P>,
         window_id: window::Id,
-        window: &Window,
+        window: &dyn Window,
     ) {
         // Update window title
         let new_title = program.title(window_id);

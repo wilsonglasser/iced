@@ -10,9 +10,16 @@ use crate::runtime::window;
 use std::pin::Pin;
 
 /// An event loop proxy with backpressure that implements `Sink`.
+///
+/// `winit 0.31` took the payload away from `EventLoopProxy`: `wake_up` only signals that the loop
+/// has something to look at, and consecutive calls may coalesce into a single
+/// `ApplicationHandler::proxy_wake_up`. So the actions travel in a queue of our own, and the
+/// wake-up is just the doorbell. The runner owns the receiving half and drains it dry on every
+/// wake-up, which is what makes coalescing harmless.
 #[derive(Debug)]
 pub struct Proxy<T: 'static> {
-    raw: winit::event_loop::EventLoopProxy<Action<T>>,
+    raw: winit::event_loop::EventLoopProxy,
+    queue: mpsc::UnboundedSender<Action<T>>,
     sender: mpsc::Sender<Action<T>>,
     notifier: mpsc::Sender<usize>,
 }
@@ -21,6 +28,7 @@ impl<T: 'static> Clone for Proxy<T> {
     fn clone(&self) -> Self {
         Self {
             raw: self.raw.clone(),
+            queue: self.queue.clone(),
             sender: self.sender.clone(),
             notifier: self.notifier.clone(),
         }
@@ -31,34 +39,49 @@ impl<T: 'static> Proxy<T> {
     const MAX_SIZE: usize = 100;
 
     /// Creates a new [`Proxy`] from an `EventLoopProxy`.
+    ///
+    /// The returned receiver is the queue the event loop must drain whenever winit reports a
+    /// wake-up; see the note on [`Proxy`].
     pub fn new(
-        raw: winit::event_loop::EventLoopProxy<Action<T>>,
-    ) -> (Self, impl Future<Output = ()>) {
+        raw: winit::event_loop::EventLoopProxy,
+    ) -> (
+        Self,
+        mpsc::UnboundedReceiver<Action<T>>,
+        impl Future<Output = ()>,
+    ) {
         let (notifier, mut processed) = mpsc::channel(Self::MAX_SIZE);
         let (sender, mut receiver) = mpsc::channel(Self::MAX_SIZE);
-        let proxy = raw.clone();
+        let (queue, actions) = mpsc::unbounded();
 
-        let worker = async move {
-            let mut count = 0;
+        let worker = {
+            let raw = raw.clone();
+            let queue = queue.clone();
 
-            loop {
-                if count < Self::MAX_SIZE {
-                    select! {
-                        message = receiver.select_next_some() => {
-                            let _ = proxy.send_event(message);
-                            count += 1;
+            async move {
+                let mut count = 0;
+
+                loop {
+                    if count < Self::MAX_SIZE {
+                        select! {
+                            message = receiver.select_next_some() => {
+                                if queue.unbounded_send(message).is_ok() {
+                                    raw.wake_up();
+                                }
+
+                                count += 1;
+                            }
+                            amount = processed.select_next_some() => {
+                                count = count.saturating_sub(amount);
+                            }
+                            complete => break,
                         }
-                        amount = processed.select_next_some() => {
-                            count = count.saturating_sub(amount);
+                    } else {
+                        select! {
+                            amount = processed.select_next_some() => {
+                                count = count.saturating_sub(amount);
+                            }
+                            complete => break,
                         }
-                        complete => break,
-                    }
-                } else {
-                    select! {
-                        amount = processed.select_next_some() => {
-                            count = count.saturating_sub(amount);
-                        }
-                        complete => break,
                     }
                 }
             }
@@ -67,9 +90,11 @@ impl<T: 'static> Proxy<T> {
         (
             Self {
                 raw,
+                queue,
                 sender,
                 notifier,
             },
+            actions,
             worker,
         )
     }
@@ -92,7 +117,9 @@ impl<T: 'static> Proxy<T> {
     /// Note: This skips the backpressure mechanism with an unbounded
     /// channel. Use sparingly!
     pub fn send_action(&self, action: Action<T>) {
-        let _ = self.raw.send_event(action);
+        if self.queue.unbounded_send(action).is_ok() {
+            self.raw.wake_up();
+        }
     }
 
     /// Frees an amount of slots for additional messages to be queued in

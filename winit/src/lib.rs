@@ -62,7 +62,9 @@ use program::Program;
 
 use rustc_hash::FxHashMap;
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::mem::ManuallyDrop;
+use std::rc::Rc;
 use std::slice;
 use std::sync::Arc;
 
@@ -78,15 +80,13 @@ where
     let settings = program.settings();
     let window_settings = program.window();
 
-    let event_loop = EventLoop::with_user_event()
-        .build()
-        .expect("Create event loop");
+    let event_loop = EventLoop::new().expect("Create event loop");
 
     let backend_settings = backend::Settings::from(&settings);
     let renderer_settings = renderer::Settings::from(&settings);
     let display_handle = event_loop.owned_display_handle();
 
-    let (proxy, worker) = Proxy::new(event_loop.create_proxy());
+    let (proxy, actions, worker) = Proxy::new(event_loop.create_proxy());
 
     #[cfg(feature = "debug")]
     {
@@ -151,12 +151,20 @@ where
         id: Option<String>,
         sender: mpsc::UnboundedSender<Event<Action<Message>>>,
         receiver: mpsc::UnboundedReceiver<Control>,
-        error: Option<Error>,
+        /// The payload `EventLoopProxy::wake_up` no longer carries; see [`Proxy`].
+        actions: mpsc::UnboundedReceiver<Action<Message>>,
+        /// Drag transfers we asked `winit` for, and whether each one was a drop or a hover.
+        drags: FxHashMap<winit::event_loop::AsyncRequestSerial, bool>,
+        /// Shared with `run`, because `winit 0.31` takes the handler BY VALUE, so there is no
+        /// runner left to read a field off of once the loop returns.
+        error: Rc<RefCell<Option<Error>>>,
         system_theme: Option<oneshot::Sender<theme::Mode>>,
 
         #[cfg(target_arch = "wasm32")]
         canvas: Option<web_sys::HtmlCanvasElement>,
     }
+
+    let error = Rc::new(RefCell::new(None));
 
     let runner = Runner {
         instance,
@@ -164,7 +172,9 @@ where
         id: settings.id,
         sender: event_sender,
         receiver: control_receiver,
-        error: None,
+        actions,
+        drags: FxHashMap::default(),
+        error: error.clone(),
         system_theme: Some(system_theme_sender),
 
         #[cfg(target_arch = "wasm32")]
@@ -173,11 +183,14 @@ where
 
     boot_span.finish();
 
-    impl<Message, F> winit::application::ApplicationHandler<Action<Message>> for Runner<Message, F>
+    impl<Message, F> winit::application::ApplicationHandler for Runner<Message, F>
     where
         F: Future<Output = ()>,
     {
-        fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        fn can_create_surfaces(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop) {
+            // `resumed` is where this lived until `winit 0.31`, but there it is documented as
+            // unsupported on every desktop platform, so it would simply never fire. This one is
+            // guaranteed on all of them, right after `StartCause::Init`.
             if let Some(sender) = self.system_theme.take() {
                 let _ = sender.send(
                     event_loop
@@ -190,30 +203,63 @@ where
 
         fn new_events(
             &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
+            event_loop: &dyn winit::event_loop::ActiveEventLoop,
             cause: winit::event::StartCause,
         ) {
-            self.process_event(
-                event_loop,
-                Event::EventLoopAwakened(winit::event::Event::NewEvents(cause)),
-            );
+            self.process_event(event_loop, Event::EventLoopAwakened(Awakening::NewEvents(cause)));
         }
 
         fn window_event(
             &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
+            event_loop: &dyn winit::event_loop::ActiveEventLoop,
             window_id: winit::window::WindowId,
             event: winit::event::WindowEvent,
         ) {
+            // A drag only announces itself in `winit 0.31`; the paths have to be asked for, and
+            // they come back in a later `DataTransferReceived`. Both halves need the event loop,
+            // which `run_instance` does not have, so the round trip is closed here.
+            match &event {
+                winit::event::WindowEvent::DragEntered { id, .. }
+                | winit::event::WindowEvent::DragDropped { id, .. } => {
+                    let dropped =
+                        matches!(event, winit::event::WindowEvent::DragDropped { .. });
+
+                    if let Ok(serial) = event_loop
+                        .fetch_data_transfer(*id, &winit::data_transfer::TypeHint::UriList)
+                    {
+                        let _ = self.drags.insert(serial, dropped);
+                    }
+                }
+                winit::event::WindowEvent::DataTransferReceived { serial, value, .. } => {
+                    if let Some(dropped) = self.drags.remove(serial) {
+                        let paths = value.try_as_file_paths().unwrap_or_default();
+
+                        if !paths.is_empty() {
+                            self.process_event(
+                                event_loop,
+                                Event::EventLoopAwakened(Awakening::Files {
+                                    window_id,
+                                    dropped,
+                                    paths,
+                                }),
+                            );
+                        }
+
+                        return;
+                    }
+                }
+                _ => {}
+            }
+
             #[cfg(target_os = "windows")]
             let is_move_or_resize = matches!(
                 event,
-                winit::event::WindowEvent::Resized(_) | winit::event::WindowEvent::Moved(_)
+                winit::event::WindowEvent::SurfaceResized(_) | winit::event::WindowEvent::Moved(_)
             );
 
             self.process_event(
                 event_loop,
-                Event::EventLoopAwakened(winit::event::Event::WindowEvent { window_id, event }),
+                Event::EventLoopAwakened(Awakening::WindowEvent { window_id, event }),
             );
 
             // TODO: Remove when unnecessary
@@ -223,39 +269,39 @@ where
             #[cfg(target_os = "windows")]
             {
                 if is_move_or_resize {
-                    self.process_event(
-                        event_loop,
-                        Event::EventLoopAwakened(winit::event::Event::AboutToWait),
-                    );
+                    self.process_event(event_loop, Event::EventLoopAwakened(Awakening::AboutToWait));
                 }
             }
         }
 
-        fn user_event(
+        fn proxy_wake_up(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop) {
+            // Wake-ups coalesce, and they can also arrive spuriously with nothing queued, so the
+            // only correct reading is "drain until empty". `try_recv` reports empty and closed the
+            // same way, as an `Err`, and both of them end the drain.
+            while let Ok(action) = self.actions.try_recv() {
+                self.process_event(event_loop, Event::EventLoopAwakened(Awakening::Action(action)));
+            }
+        }
+
+        fn about_to_wait(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop) {
+            self.process_event(event_loop, Event::EventLoopAwakened(Awakening::AboutToWait));
+        }
+
+        #[cfg(target_os = "macos")]
+        fn macos_handler(
             &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
-            action: Action<Message>,
-        ) {
-            self.process_event(
-                event_loop,
-                Event::EventLoopAwakened(winit::event::Event::UserEvent(action)),
-            );
+        ) -> Option<&mut dyn winit::platform::macos::ApplicationHandlerExtMacOS> {
+            Some(self)
         }
+    }
 
-        fn received_url(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, url: String) {
-            self.process_event(
-                event_loop,
-                Event::EventLoopAwakened(winit::event::Event::PlatformSpecific(
-                    winit::event::PlatformSpecific::MacOS(winit::event::MacOS::ReceivedUrl(url)),
-                )),
-            );
-        }
-
-        fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-            self.process_event(
-                event_loop,
-                Event::EventLoopAwakened(winit::event::Event::AboutToWait),
-            );
+    #[cfg(target_os = "macos")]
+    impl<Message, F> winit::platform::macos::ApplicationHandlerExtMacOS for Runner<Message, F>
+    where
+        F: Future<Output = ()>,
+    {
+        fn received_url(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop, url: String) {
+            self.process_event(event_loop, Event::EventLoopAwakened(Awakening::ReceivedUrl(url)));
         }
     }
 
@@ -265,7 +311,7 @@ where
     {
         fn process_event(
             &mut self,
-            event_loop: &winit::event_loop::ActiveEventLoop,
+            event_loop: &dyn winit::event_loop::ActiveEventLoop,
             event: Event<Action<Message>>,
         ) {
             if event_loop.exiting() {
@@ -316,6 +362,7 @@ where
                                     scale_factor,
                                     monitor.or(event_loop.primary_monitor()),
                                     self.id.clone(),
+                                    event_loop,
                                 )
                                 .with_visible(false);
 
@@ -386,7 +433,7 @@ where
                                     event_loop,
                                     Event::WindowCreated {
                                         id,
-                                        window: Arc::new(window),
+                                        window: Arc::from(window),
                                         exit_on_close_request,
                                         make_visible: visible,
                                         on_open,
@@ -399,7 +446,7 @@ where
                                 break;
                             }
                             Control::Crash(error) => {
-                                self.error = Some(error);
+                                *self.error.borrow_mut() = Some(error);
                                 event_loop.exit();
                             }
                             Control::SetAutomaticWindowTabbing(_enabled) => {
@@ -425,10 +472,10 @@ where
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let mut runner = runner;
-        let _ = event_loop.run_app(&mut runner);
+        let _ = event_loop.run_app(runner);
 
-        runner.error.map(Err).unwrap_or(Ok(()))
+        let error = error.borrow_mut().take();
+        error.map(Err).unwrap_or(Ok(()))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -444,13 +491,41 @@ where
 enum Event<Message: 'static> {
     WindowCreated {
         id: window::Id,
-        window: Arc<winit::window::Window>,
+        window: Arc<dyn winit::window::Window>,
         exit_on_close_request: bool,
         make_visible: bool,
         on_open: oneshot::Sender<window::Id>,
     },
-    EventLoopAwakened(winit::event::Event<Message>),
+    EventLoopAwakened(Awakening<Message>),
     Exit,
+}
+
+/// Whatever woke the event loop up.
+///
+/// `winit 0.31` deleted its `Event` enum and replaced it with `ApplicationHandler` callbacks, so
+/// this is the shape the instance loop consumes, reassembled from the callbacks that survived.
+#[derive(Debug)]
+enum Awakening<Message: 'static> {
+    NewEvents(winit::event::StartCause),
+    WindowEvent {
+        window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    },
+    /// One action drained from the [`Proxy`] queue after a wake-up.
+    Action(Message),
+    /// The paths behind a drag, once they finally arrived.
+    ///
+    /// `winit 0.31` no longer puts them in the event: the drag only carries a `DataTransferId`,
+    /// and the contents come back later through `DataTransferReceived`.
+    Files {
+        window_id: winit::window::WindowId,
+        dropped: bool,
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// macOS only: the application was asked to open one of the URL schemes it declares.
+    #[cfg_attr(not(target_os = "macos"), expect(dead_code))]
+    ReceivedUrl(String),
+    AboutToWait,
 }
 
 #[derive(Debug)]
@@ -686,12 +761,12 @@ async fn run_instance<P>(
             }
             Event::EventLoopAwakened(event) => {
                 match event {
-                    event::Event::NewEvents(event::StartCause::Init) => {
+                    Awakening::NewEvents(event::StartCause::Init) => {
                         for (_id, window) in window_manager.iter_mut() {
                             window.raw.request_redraw();
                         }
                     }
-                    event::Event::NewEvents(event::StartCause::ResumeTimeReached { .. }) => {
+                    Awakening::NewEvents(event::StartCause::ResumeTimeReached { .. }) => {
                         let now = Instant::now();
 
                         for (_id, window) in window_manager.iter_mut() {
@@ -711,16 +786,38 @@ async fn run_instance<P>(
                                 control_sender.start_send(Control::ChangeFlow(ControlFlow::Wait));
                         }
                     }
-                    event::Event::PlatformSpecific(event::PlatformSpecific::MacOS(
-                        event::MacOS::ReceivedUrl(url),
-                    )) => {
+                    Awakening::ReceivedUrl(url) => {
                         runtime.broadcast(subscription::Event::PlatformSpecific(
                             subscription::PlatformSpecific::MacOS(
                                 subscription::MacOS::ReceivedUrl(url),
                             ),
                         ));
                     }
-                    event::Event::UserEvent(action) => {
+                    Awakening::Files {
+                        window_id,
+                        dropped,
+                        paths,
+                    } => {
+                        let Some((id, window)) = window_manager.get_mut_alias(window_id) else {
+                            continue;
+                        };
+
+                        // One event per path, which is the shape iced already had when `winit`
+                        // still sent `HoveredFile` / `DroppedFile` one at a time.
+                        events.extend(paths.into_iter().map(|path| {
+                            (
+                                id,
+                                core::Event::Window(if dropped {
+                                    window::Event::FileDropped(path)
+                                } else {
+                                    window::Event::FileHovered(path)
+                                }),
+                            )
+                        }));
+
+                        window.raw.request_redraw();
+                    }
+                    Awakening::Action(action) => {
                         run_action(
                             action,
                             &program,
@@ -740,7 +837,7 @@ async fn run_instance<P>(
                         );
                         actions += 1;
                     }
-                    event::Event::WindowEvent {
+                    Awakening::WindowEvent {
                         window_id: id,
                         event: event::WindowEvent::RedrawRequested,
                         ..
@@ -991,7 +1088,7 @@ async fn run_instance<P>(
                             },
                         }
                     }
-                    event::Event::WindowEvent {
+                    Awakening::WindowEvent {
                         event: window_event,
                         window_id,
                     } => {
@@ -1012,7 +1109,7 @@ async fn run_instance<P>(
                         };
 
                         match window_event {
-                            winit::event::WindowEvent::Resized(_)
+                            winit::event::WindowEvent::SurfaceResized(_)
                             | winit::event::WindowEvent::Occluded(false) => {
                                 window.raw.request_redraw();
                             }
@@ -1050,7 +1147,7 @@ async fn run_instance<P>(
                                 &mut renderer_settings,
                             );
                         } else {
-                            window.state.update(&program, &window.raw, &window_event);
+                            window.state.update(&program, &*window.raw, &window_event);
 
                             if let Some(event) = conversion::window_event(
                                 window_event,
@@ -1061,7 +1158,7 @@ async fn run_instance<P>(
                             }
                         }
                     }
-                    event::Event::AboutToWait => {
+                    Awakening::AboutToWait => {
                         if actions > 0 {
                             proxy.free_slots(actions);
                             actions = 0;
@@ -1197,7 +1294,7 @@ async fn run_instance<P>(
                                 control_sender.start_send(Control::ChangeFlow(ControlFlow::Wait));
                         }
                     }
-                    _ => {}
+                    Awakening::NewEvents(_) => {}
                 }
             }
             Event::Exit => break,
@@ -1387,45 +1484,45 @@ fn run_action<'a, P, C>(
             }
             window::Action::Resize(id, size) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    let _ = window.raw.request_inner_size(
+                    let _ = window.raw.request_surface_size(
                         winit::dpi::LogicalSize {
                             width: size.width,
                             height: size.height,
                         }
-                        .to_physical::<f32>(f64::from(window.state.scale_factor())),
+                        .to_physical::<f32>(f64::from(window.state.scale_factor())).into(),
                     );
                 }
             }
             window::Action::SetMinSize(id, size) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    window.raw.set_min_inner_size(size.map(|size| {
+                    window.raw.set_min_surface_size(size.map(|size| {
                         winit::dpi::LogicalSize {
                             width: size.width,
                             height: size.height,
                         }
-                        .to_physical::<f32>(f64::from(window.state.scale_factor()))
+                        .to_physical::<f32>(f64::from(window.state.scale_factor())).into()
                     }));
                 }
             }
             window::Action::SetMaxSize(id, size) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    window.raw.set_max_inner_size(size.map(|size| {
+                    window.raw.set_max_surface_size(size.map(|size| {
                         winit::dpi::LogicalSize {
                             width: size.width,
                             height: size.height,
                         }
-                        .to_physical::<f32>(f64::from(window.state.scale_factor()))
+                        .to_physical::<f32>(f64::from(window.state.scale_factor())).into()
                     }));
                 }
             }
             window::Action::SetResizeIncrements(id, increments) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    window.raw.set_resize_increments(increments.map(|size| {
+                    window.raw.set_surface_resize_increments(increments.map(|size| {
                         winit::dpi::LogicalSize {
                             width: size.width,
                             height: size.height,
                         }
-                        .to_physical::<f32>(f64::from(window.state.scale_factor()))
+                        .to_physical::<f32>(f64::from(window.state.scale_factor())).into()
                     }));
                 }
             }
@@ -1484,10 +1581,13 @@ fn run_action<'a, P, C>(
             }
             window::Action::Move(id, position) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    window.raw.set_outer_position(winit::dpi::LogicalPosition {
-                        x: position.x,
-                        y: position.y,
-                    });
+                    window.raw.set_outer_position(
+                        winit::dpi::LogicalPosition {
+                            x: position.x,
+                            y: position.y,
+                        }
+                        .into(),
+                    );
                 }
             }
             window::Action::SetMode(id, mode) => {
@@ -1545,15 +1645,18 @@ fn run_action<'a, P, C>(
                 if let Some(window) = window_manager.get_mut(id)
                     && let mouse::Cursor::Available(point) = window.state.cursor()
                 {
-                    window.raw.show_window_menu(winit::dpi::LogicalPosition {
-                        x: point.x,
-                        y: point.y,
-                    });
+                    window.raw.show_window_menu(
+                        winit::dpi::LogicalPosition {
+                            x: point.x,
+                            y: point.y,
+                        }
+                        .into(),
+                    );
                 }
             }
             window::Action::GetRawId(id, channel) => {
                 if let Some(window) = window_manager.get_mut(id) {
-                    let _ = channel.send(window.raw.id().into());
+                    let _ = channel.send(window.raw.id().into_raw() as u64);
                 }
             }
             window::Action::Run(id, f) => {
@@ -1590,24 +1693,35 @@ fn run_action<'a, P, C>(
             }
             window::Action::GetMonitorSize(id, channel) => {
                 if let Some(window) = window_manager.get(id) {
-                    let size = window.raw.current_monitor().map(|monitor| {
-                        let scale = window.state.scale_factor();
-                        let size = monitor.size().to_logical(f64::from(scale));
+                    // `winit 0.31` dropped `MonitorHandle::size`; the resolution now lives on the
+                    // current video mode, and a monitor without one has no size to report.
+                    let size = window
+                        .raw
+                        .current_monitor()
+                        .and_then(|monitor| monitor.current_video_mode())
+                        .map(|mode| {
+                            let scale = window.state.scale_factor();
+                            let size = mode.size().to_logical(f64::from(scale));
 
-                        Size::new(size.width, size.height)
-                    });
+                            Size::new(size.width, size.height)
+                        });
 
                     let _ = channel.send(size);
                 }
             }
             window::Action::GetMonitorPosition(id, channel) => {
                 if let Some(window) = window_manager.get(id) {
-                    let position = window.raw.current_monitor().map(|monitor| {
-                        let scale = window.state.scale_factor();
-                        let position = monitor.position().to_logical(f64::from(scale));
+                    // `position` became fallible in `winit 0.31`: Wayland never reports one.
+                    let position = window
+                        .raw
+                        .current_monitor()
+                        .and_then(|monitor| monitor.position())
+                        .map(|position| {
+                            let scale = window.state.scale_factor();
+                            let position = position.to_logical(f64::from(scale));
 
-                        Point::new(position.x, position.y)
-                    });
+                            Point::new(position.x, position.y)
+                        });
 
                     let _ = channel.send(position);
                 }
@@ -1677,7 +1791,7 @@ fn run_action<'a, P, C>(
                 for (_id, window) in window_manager.iter_mut() {
                     window.state.update(
                         program,
-                        &window.raw,
+                        &*window.raw,
                         &winit::event::WindowEvent::ThemeChanged(theme),
                     );
                 }
@@ -1845,7 +1959,7 @@ where
     for (id, window) in window_manager.iter_mut() {
         let old_size = window.state.logical_size();
 
-        window.state.synchronize(program, id, &window.raw);
+        window.state.synchronize(program, id, &*window.raw);
 
         let new_size = window.state.logical_size();
 
