@@ -2014,7 +2014,7 @@ pub fn user_force_quit(
                     ..
                 },
             ..
-        } if c == "q" && _modifiers.super_key() => true,
+        } if c == "q" && _modifiers.meta_key() => true,
         _ => false,
     }
 }
