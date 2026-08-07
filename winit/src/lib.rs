@@ -153,8 +153,12 @@ where
         receiver: mpsc::UnboundedReceiver<Control>,
         /// The payload `EventLoopProxy::wake_up` no longer carries; see [`Proxy`].
         actions: mpsc::UnboundedReceiver<Action<Message>>,
-        /// Drag transfers we asked `winit` for, and whether each one was a drop or a hover.
-        drags: FxHashMap<winit::event_loop::AsyncRequestSerial, bool>,
+        /// Drag transfers we asked `winit` for: the drag each one belongs to, and whether it
+        /// was a drop or a hover.
+        drags: FxHashMap<
+            winit::event_loop::AsyncRequestSerial,
+            (winit::data_transfer::DataTransferId, bool),
+        >,
         /// Shared with `run`, because `winit 0.31` takes the handler BY VALUE, so there is no
         /// runner left to read a field off of once the loop returns.
         error: Rc<RefCell<Option<Error>>>,
@@ -227,11 +231,19 @@ where
                     if let Ok(serial) = event_loop
                         .fetch_data_transfer(*id, &winit::data_transfer::TypeHint::UriList)
                     {
-                        let _ = self.drags.insert(serial, dropped);
+                        let _ = self.drags.insert(serial, (*id, dropped));
                     }
                 }
+                winit::event::WindowEvent::DragLeft { id } => {
+                    // Forget what we asked for. This both keeps the map from growing by one entry
+                    // per abandoned drag, and stops a fetch that resolves LATE from publishing a
+                    // `FileHovered` after the `FilesHoveredLeft` this same event produces: the
+                    // hover is asynchronous while the leave is not, so without this the app would
+                    // be told files are still hovering after they left.
+                    self.drags.retain(|_, (drag, _)| drag != id);
+                }
                 winit::event::WindowEvent::DataTransferReceived { serial, value, .. } => {
-                    if let Some(dropped) = self.drags.remove(serial) {
+                    if let Some((_, dropped)) = self.drags.remove(serial) {
                         let paths = value.try_as_file_paths().unwrap_or_default();
 
                         if !paths.is_empty() {

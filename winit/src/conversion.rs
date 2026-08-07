@@ -224,8 +224,10 @@ pub fn window_event(
             winit::event::PointerKind::Touch(finger_id) => {
                 // `winit 0.31` no longer distinguishes a lifted finger from a cancelled one, so
                 // `touch::Event::FingerLost` has become unreachable; a cancelled touch now reads
-                // as a lift. It also may not report where it left, and a lift with no position is
-                // not expressible in iced.
+                // as a lift. It also may not report WHERE the finger left, and iced has no lift
+                // without a position, so such a lift is dropped and that finger stays pressed as
+                // far as iced is concerned. Fixing that means remembering the last position per
+                // finger, which is not worth carrying for a desktop SSH client.
                 Event::Touch(touch::Event::FingerLifted {
                     id: finger(finger_id),
                     position: logical_point(position?, scale_factor),
