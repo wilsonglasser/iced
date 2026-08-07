@@ -547,6 +547,19 @@ pub enum Key {
     Escape,
     Tab,
     Backspace,
+    Delete,
+    Insert,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Up,
+    Down,
+    Left,
+    Right,
+    Space,
+    /// A function key, `F1` through `F12`.
+    Function(u8),
     /// A plain character key (e.g. the `k` of `ctrl+k`).
     Char(char),
 }
@@ -558,8 +571,42 @@ impl From<Key> for keyboard::Key {
             Key::Escape => Self::Named(keyboard::key::Named::Escape),
             Key::Tab => Self::Named(keyboard::key::Named::Tab),
             Key::Backspace => Self::Named(keyboard::key::Named::Backspace),
+            Key::Delete => Self::Named(keyboard::key::Named::Delete),
+            Key::Insert => Self::Named(keyboard::key::Named::Insert),
+            Key::Home => Self::Named(keyboard::key::Named::Home),
+            Key::End => Self::Named(keyboard::key::Named::End),
+            Key::PageUp => Self::Named(keyboard::key::Named::PageUp),
+            Key::PageDown => Self::Named(keyboard::key::Named::PageDown),
+            Key::Up => Self::Named(keyboard::key::Named::ArrowUp),
+            Key::Down => Self::Named(keyboard::key::Named::ArrowDown),
+            Key::Left => Self::Named(keyboard::key::Named::ArrowLeft),
+            Key::Right => Self::Named(keyboard::key::Named::ArrowRight),
+            Key::Space => Self::Named(keyboard::key::Named::Space),
+            Key::Function(n) => Self::Named(function_key(n)),
             Key::Char(c) => Self::Character(SmolStr::new(c.to_string())),
         }
+    }
+}
+
+/// `F1` through `F12`. Out-of-range numbers cannot reach here: the
+/// parser only accepts 1..=12, and the formatter only emits what it
+/// parsed.
+fn function_key(n: u8) -> keyboard::key::Named {
+    use keyboard::key::Named;
+
+    match n {
+        1 => Named::F1,
+        2 => Named::F2,
+        3 => Named::F3,
+        4 => Named::F4,
+        5 => Named::F5,
+        6 => Named::F6,
+        7 => Named::F7,
+        8 => Named::F8,
+        9 => Named::F9,
+        10 => Named::F10,
+        11 => Named::F11,
+        _ => Named::F12,
     }
 }
 
@@ -612,6 +659,18 @@ mod format {
             Key::Escape => "escape".to_owned(),
             Key::Tab => "tab".to_owned(),
             Key::Backspace => "backspace".to_owned(),
+            Key::Delete => "delete".to_owned(),
+            Key::Insert => "insert".to_owned(),
+            Key::Home => "home".to_owned(),
+            Key::End => "end".to_owned(),
+            Key::PageUp => "pageup".to_owned(),
+            Key::PageDown => "pagedown".to_owned(),
+            Key::Up => "up".to_owned(),
+            Key::Down => "down".to_owned(),
+            Key::Left => "left".to_owned(),
+            Key::Right => "right".to_owned(),
+            Key::Space => "space".to_owned(),
+            Key::Function(n) => format!("f{n}"),
             Key::Char(c) => c.to_string(),
         }
     }
@@ -844,12 +903,57 @@ mod parser {
     }
 
     fn key(input: &str) -> IResult<&str, Key> {
+        // Nested `alt`s: the tuple form tops out well below the number
+        // of keys named here.
         alt((
-            map(tag("enter"), |_| Key::Enter),
-            map(tag("escape"), |_| Key::Escape),
-            map(tag("tab"), |_| Key::Tab),
-            map(tag("backspace"), |_| Key::Backspace),
+            alt((
+                map(tag("enter"), |_| Key::Enter),
+                map(tag("escape"), |_| Key::Escape),
+                map(tag("tab"), |_| Key::Tab),
+                map(tag("backspace"), |_| Key::Backspace),
+                map(tag("delete"), |_| Key::Delete),
+                map(tag("insert"), |_| Key::Insert),
+                map(tag("space"), |_| Key::Space),
+            )),
+            alt((
+                // `pageup` / `pagedown` come first so the shorter `up` /
+                // `down` cannot claim their tails.
+                map(tag("pageup"), |_| Key::PageUp),
+                map(tag("pagedown"), |_| Key::PageDown),
+                map(tag("home"), |_| Key::Home),
+                map(tag("end"), |_| Key::End),
+                map(tag("up"), |_| Key::Up),
+                map(tag("down"), |_| Key::Down),
+                map(tag("left"), |_| Key::Left),
+                map(tag("right"), |_| Key::Right),
+            )),
+            function,
         ))
+        .parse(input)
+    }
+
+    /// `f1` through `f12`. The range is enforced here rather than at use,
+    /// so `f13` fails to parse instead of quietly becoming something
+    /// else, and a bare `f` (the `f` of `ctrl+f`) falls through to the
+    /// character branch because the digits are required.
+    fn function(input: &str) -> IResult<&str, Key> {
+        map_opt(
+            preceded(
+                char('f'),
+                // The COMPLETE combinator: the module-level import is
+                // nom's streaming one, which answers `Incomplete` when
+                // the input ends mid-key rather than failing, and an
+                // `Incomplete` reaching `finish()` is a panic.
+                nom::character::complete::digit1,
+            ),
+            |digits: &str| {
+                digits
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|n| (1..=12).contains(n))
+                    .map(Key::Function)
+            },
+        )
         .parse(input)
     }
 
@@ -1114,4 +1218,72 @@ mod tests {
         );
         assert!(rest.is_none());
     }
+
+    /// Every named key round-trips through both the parser and the
+    /// formatter, which is what keeps a recorded `.ice` file replayable.
+    #[test]
+    fn it_round_trips_every_named_key() {
+        for name in [
+            "enter", "escape", "tab", "backspace", "delete", "insert", "space", "home", "end",
+            "pageup", "pagedown", "up", "down", "left", "right", "f1", "f9", "f10", "f12",
+        ] {
+            roundtrip(&format!("type {name}"));
+            roundtrip(&format!("press {name}"));
+            roundtrip(&format!("release {name}"));
+        }
+    }
+
+    /// The names that share a prefix have to resolve to the longer one,
+    /// or `pageup` silently becomes `page` plus dangling input.
+    #[test]
+    fn it_prefers_the_longer_key_name() {
+        assert_eq!(parse("type pageup"), parse("type pageup"));
+        for (line, expected) in [
+            ("type pageup", Key::PageUp),
+            ("type pagedown", Key::PageDown),
+            ("type up", Key::Up),
+            ("type down", Key::Down),
+            ("type end", Key::End),
+            ("type enter", Key::Enter),
+            ("type f12", Key::Function(12)),
+            ("type f1", Key::Function(1)),
+        ] {
+            assert_eq!(
+                parse(line),
+                Instruction::Interact(Interaction::Keyboard(Keyboard::Type(expected))),
+                "{line} parsed as the wrong key"
+            );
+        }
+    }
+
+    /// `f` alone is the character key of `ctrl+f`, not a malformed
+    /// function key, and a function number out of range is a parse
+    /// failure rather than a silent clamp.
+    #[test]
+    fn it_keeps_bare_f_a_character() {
+        assert_eq!(
+            parse("type ctrl+f"),
+            Instruction::Interact(Interaction::Keyboard(Keyboard::Shortcut {
+                modifiers: keyboard::Modifiers::CTRL,
+                key: Key::Char('f'),
+            }))
+        );
+        assert!(Instruction::parse("type f13").is_err());
+        assert!(Instruction::parse("type f0").is_err());
+    }
+
+    /// A named key is usable as the tail of a chord, so `ctrl+delete`
+    /// and friends are expressible.
+    #[test]
+    fn it_parses_named_keys_in_chords() {
+        assert_eq!(
+            parse("type ctrl+delete"),
+            Instruction::Interact(Interaction::Keyboard(Keyboard::Shortcut {
+                modifiers: keyboard::Modifiers::CTRL,
+                key: Key::Delete,
+            }))
+        );
+        roundtrip("type shift+up");
+    }
+
 }
