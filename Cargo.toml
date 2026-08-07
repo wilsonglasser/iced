@@ -241,7 +241,7 @@ unicode-segmentation = "1.0"
 url = "2.5"
 wasm-bindgen-futures = "0.4"
 wasmtimer = "0.4.2"
-web-sys = "=0.3.85"
+web-sys = "=0.3.103"
 web-time = "1.1"
 wgpu = { version = "29", default-features = false, features = ["std", "wgsl"] }
 winit = { git = "https://github.com/wilsonglasser/winit", default-features = false }

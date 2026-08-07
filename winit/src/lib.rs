@@ -379,10 +379,12 @@ where
                                 .with_visible(false);
 
                                 #[cfg(target_arch = "wasm32")]
-                                let window_attributes = {
-                                    use winit::platform::web::WindowAttributesExtWebSys;
-                                    window_attributes.with_canvas(self.canvas.take())
-                                };
+                                let window_attributes = window_attributes.with_platform_attributes(
+                                    Box::new(
+                                        winit::platform::web::WindowAttributesWeb::default()
+                                            .with_canvas(self.canvas.take()),
+                                    ),
+                                );
 
                                 log::info!(
                                     "Window attributes for id `{id:#?}`: {window_attributes:#?}"
@@ -408,9 +410,12 @@ where
 
                                 #[cfg(target_arch = "wasm32")]
                                 {
-                                    use winit::platform::web::WindowExtWebSys;
+                                    use winit::platform::web::WindowExtWeb;
 
-                                    let canvas = window.canvas().expect("Get window canvas");
+                                    // `canvas` hands back a borrow now, and the element is needed
+                                    // past the end of that borrow.
+                                    let canvas =
+                                        window.canvas().expect("Get window canvas").clone();
 
                                     let _ = canvas.set_attribute(
                                         "style",
@@ -492,8 +497,8 @@ where
 
     #[cfg(target_arch = "wasm32")]
     {
-        use winit::platform::web::EventLoopExtWebSys;
-        let _ = event_loop.spawn_app(runner);
+        use winit::event_loop::register::EventLoopExtRegister;
+        event_loop.register_app(runner);
 
         Ok(())
     }
