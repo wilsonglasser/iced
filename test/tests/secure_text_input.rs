@@ -93,6 +93,42 @@ fn double_click_select_backspace_fires_on_input() {
 }
 
 #[test]
+fn double_click_mid_word_backspace_fires_on_input() {
+    let mut sim = new_sim();
+    let bounds = input_bounds(&mut sim);
+
+    // Double-click in the middle of the masked word: the caret lands
+    // mid-word, but the whole word must still be selected.
+    let y = bounds.y + bounds.height / 2.0;
+    let middle = Point::new(bounds.x + 15.0, y);
+
+    sim.point_at(middle);
+    let _ = sim.simulate([Event::Mouse(mouse::Event::ButtonPressed(
+        mouse::Button::Left,
+    ))]);
+    let _ = sim.simulate([Event::Mouse(mouse::Event::ButtonReleased(
+        mouse::Button::Left,
+    ))]);
+
+    sim.point_at(middle);
+    let _ = sim.simulate([Event::Mouse(mouse::Event::ButtonPressed(
+        mouse::Button::Left,
+    ))]);
+    let _ = sim.simulate([Event::Mouse(mouse::Event::ButtonReleased(
+        mouse::Button::Left,
+    ))]);
+
+    let _ = sim.tap_key(keyboard::Key::Named(keyboard::key::Named::Backspace));
+
+    let messages: Vec<String> = sim.into_messages().collect();
+
+    assert!(
+        messages.last().is_some_and(|message| message.is_empty()),
+        "mid-word double-click + backspace should publish an empty on_input, got: {messages:?}"
+    );
+}
+
+#[test]
 fn drag_select_backspace_fires_on_input() {
     let mut sim = new_sim();
     let bounds = input_bounds(&mut sim);

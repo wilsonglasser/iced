@@ -295,35 +295,31 @@ impl editor::Editor for Editor {
 
         let selection = match editor.selection() {
             cosmic_text::Selection::None => None,
-            cosmic_text::Selection::Normal(cursor)
-            | cosmic_text::Selection::Line(cursor)
-            | cosmic_text::Selection::Word(cursor) => {
-                let selection = Position {
-                    line: cursor.line,
-                    index: cursor.index,
-                };
+            cosmic_text::Selection::Normal(cursor) => Some(Position {
+                line: cursor.line,
+                index: cursor.index,
+            }),
+            cosmic_text::Selection::Line(_) | cosmic_text::Selection::Word(_) => {
+                // A word/line selection stores the caret in both the cursor
+                // and the selection itself, so mirroring it verbatim would
+                // collapse into a zero-width pair once it is translated to
+                // another editor (e.g. the secure-input mirror), and a later
+                // `Backspace` would delete nothing. Recover the actual bounds
+                // instead, with the caret at the end of the word/line.
+                let (start, end) = editor
+                    .selection_bounds()
+                    .expect("word/line selection must have bounds");
 
-                // A word/line selection stores its *end* in both the
-                // editor cursor and the selection itself, so the pair
-                // would collapse into a zero-width selection once it is
-                // translated to another editor (e.g. the secure-input
-                // mirror), making a later `Backspace` delete nothing.
-                // Recover the other end from the selection bounds: the
-                // anchor is whichever bound does not match the caret.
-                let other = editor.selection_bounds().map(|(start, end)| {
-                    let start = Position {
-                        line: start.line,
-                        index: start.index,
-                    };
-                    let end = Position {
+                return Cursor {
+                    position: Position {
                         line: end.line,
                         index: end.index,
-                    };
-
-                    if start == position { end } else { start }
-                });
-
-                Some(other.unwrap_or(selection))
+                    },
+                    selection: Some(Position {
+                        line: start.line,
+                        index: start.index,
+                    }),
+                };
             }
         };
 
@@ -1133,8 +1129,6 @@ mod tests {
         assert!(editor.is_empty(), "backspace should clear the selection");
     }
 
-
-
     #[test]
     fn word_selection_cursor_has_distinct_ends() {
         let mut editor = editor_with("abcdef");
@@ -1156,6 +1150,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn word_selection_cursor_spans_the_whole_word() {
+        let mut editor = editor_with("abcdef");
+
+        // Click in the middle of the word: the caret lands mid-word, and
+        // a double-click still selects the whole word.
+        editor.perform(Action::Click(Point::new(10.0, 0.0)));
+        editor.perform(Action::SelectWord);
+
+        let cursor = editor.cursor();
+
+        assert_eq!(
+            cursor.position,
+            Position { line: 0, index: 6 },
+            "caret should sit at the end of the selected word"
+        );
+        assert_eq!(
+            cursor.selection,
+            Some(Position { line: 0, index: 0 }),
+            "selection should start at the beginning of the word"
+        );
+
+        editor.perform(Action::Edit(Edit::Backspace));
+
+        assert!(editor.is_empty(), "backspace should clear the whole word");
+    }
 
     #[test]
     fn select_word_then_backspace_clears_selection() {
