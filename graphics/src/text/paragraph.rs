@@ -529,7 +529,6 @@ impl core::text::Paragraph for Paragraph {
     fn visual_line_height(&self) -> Option<f32> {
         Some(self.internal().buffer.metrics().line_height / self.0.hint_factor)
     }
-
 }
 
 impl Default for Paragraph {
