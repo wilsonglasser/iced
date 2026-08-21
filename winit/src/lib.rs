@@ -223,11 +223,7 @@ where
             // they come back in a later `DataTransferReceived`. Both halves need the event loop,
             // which `run_instance` does not have, so the round trip is closed here.
             match &event {
-                winit::event::WindowEvent::DragEntered { id, .. }
-                | winit::event::WindowEvent::DragDropped { id, .. } => {
-                    let dropped =
-                        matches!(event, winit::event::WindowEvent::DragDropped { .. });
-
+                winit::event::WindowEvent::DragEntered { id, .. } => {
                     // A drag only becomes a drop when the target declares
                     // what it will do with the data. winit's win32 backend
                     // negotiates the OLE effect from these actions, and the
@@ -237,18 +233,26 @@ where
                     // whole story.
                     let _ = event_loop
                         .set_valid_dnd_actions(*id, &[winit::event_loop::DndAction::Copy]);
-                    tracing::debug!(dropped, "dnd: drag announced, valid actions = [Copy]");
 
                     if let Ok(serial) = event_loop
                         .fetch_data_transfer(*id, &winit::data_transfer::TypeHint::UriList)
                     {
-                        let _ = self.drags.insert(serial, (*id, dropped));
-                    } else {
-                        tracing::debug!("dnd: fetch_data_transfer rejected");
+                        let _ = self.drags.insert(serial, (*id, false));
+                    }
+                }
+                winit::event::WindowEvent::DragDropped { id, .. } => {
+                    // The drop is final here, and winit's win32 backend is
+                    // still holding the drag state borrowed while it
+                    // dispatched this event, so `set_valid_dnd_actions` (a
+                    // mutable borrow) would panic. The actions were already
+                    // declared on `DragEntered`; only ask for the data now.
+                    if let Ok(serial) = event_loop
+                        .fetch_data_transfer(*id, &winit::data_transfer::TypeHint::UriList)
+                    {
+                        let _ = self.drags.insert(serial, (*id, true));
                     }
                 }
                 winit::event::WindowEvent::DragLeft { id } => {
-                    tracing::debug!("dnd: drag left (rejected or abandoned)");
                     // Forget what we asked for. This both keeps the map from growing by one entry
                     // per abandoned drag, and stops a fetch that resolves LATE from publishing a
                     // `FileHovered` after the `FilesHoveredLeft` this same event produces: the
@@ -259,8 +263,6 @@ where
                 winit::event::WindowEvent::DataTransferReceived { serial, value, .. } => {
                     if let Some((_, dropped)) = self.drags.remove(serial) {
                         let paths = value.try_as_file_paths().unwrap_or_default();
-
-                        tracing::debug!(?serial, dropped, paths = paths.len(), "dnd: data transfer received");
 
                         if !paths.is_empty() {
                             self.process_event(
