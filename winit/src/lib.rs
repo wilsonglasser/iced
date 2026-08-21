@@ -228,13 +228,27 @@ where
                     let dropped =
                         matches!(event, winit::event::WindowEvent::DragDropped { .. });
 
+                    // A drag only becomes a drop when the target declares
+                    // what it will do with the data. winit's win32 backend
+                    // negotiates the OLE effect from these actions, and the
+                    // empty set is DROPEFFECT_NONE: the source sees a
+                    // rejected drag, so no paths ever reach the app. iced is
+                    // a shell that always wants the files, so copy is the
+                    // whole story.
+                    let _ = event_loop
+                        .set_valid_dnd_actions(*id, &[winit::event_loop::DndAction::Copy]);
+                    tracing::debug!(dropped, "dnd: drag announced, valid actions = [Copy]");
+
                     if let Ok(serial) = event_loop
                         .fetch_data_transfer(*id, &winit::data_transfer::TypeHint::UriList)
                     {
                         let _ = self.drags.insert(serial, (*id, dropped));
+                    } else {
+                        tracing::debug!("dnd: fetch_data_transfer rejected");
                     }
                 }
                 winit::event::WindowEvent::DragLeft { id } => {
+                    tracing::debug!("dnd: drag left (rejected or abandoned)");
                     // Forget what we asked for. This both keeps the map from growing by one entry
                     // per abandoned drag, and stops a fetch that resolves LATE from publishing a
                     // `FileHovered` after the `FilesHoveredLeft` this same event produces: the
@@ -245,6 +259,8 @@ where
                 winit::event::WindowEvent::DataTransferReceived { serial, value, .. } => {
                     if let Some((_, dropped)) = self.drags.remove(serial) {
                         let paths = value.try_as_file_paths().unwrap_or_default();
+
+                        tracing::debug!(?serial, dropped, paths = paths.len(), "dnd: data transfer received");
 
                         if !paths.is_empty() {
                             self.process_event(
