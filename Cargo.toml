@@ -228,6 +228,7 @@ semver = "1.0"
 serde = "1.0"
 sha2 = "0.10"
 sipper = "0.1"
+smithay-clipboard = "0.7.3"
 smol = "2"
 smol_str = "0.3"
 softbuffer = { version = "0.4", default-features = false }
@@ -245,6 +246,7 @@ web-sys = "=0.3.103"
 web-time = "1.1"
 wgpu = { version = "29", default-features = false, features = ["std", "wgsl"] }
 winit = { git = "https://github.com/wilsonglasser/winit", default-features = false }
+wl-clipboard-rs = "0.9"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "deny", priority = -1 }

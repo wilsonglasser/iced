@@ -21,7 +21,7 @@ unconditional-rendering = []
 linux-theme-detection = ["dep:mundy", "mundy/async-io", "mundy/color-scheme"]
 image = ["iced_runtime/image", "arboard/image-data"]
 x11 = ["winit/x11"]
-wayland = ["winit/wayland", "winit/wayland-dlopen", "winit/wayland-csd-adwaita", "arboard/wayland-data-control"]
+wayland = ["winit/wayland", "winit/wayland-dlopen", "winit/wayland-csd-adwaita", "arboard/wayland-data-control", "dep:smithay-clipboard", "dep:wl-clipboard-rs", "dep:raw-window-handle"]
 
 [dependencies]
 iced_debug.workspace = true
@@ -48,4 +48,13 @@ wasm-bindgen-futures.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 mundy.workspace = true
 mundy.optional = true
+
+raw-window-handle.workspace = true
+raw-window-handle.optional = true
+
+smithay-clipboard.workspace = true
+smithay-clipboard.optional = true
+
+wl-clipboard-rs.workspace = true
+wl-clipboard-rs.optional = true
 

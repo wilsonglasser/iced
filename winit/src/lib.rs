@@ -608,7 +608,7 @@ async fn run_instance<P>(
 
     let mut ui_caches = FxHashMap::default();
     let mut user_interfaces = ManuallyDrop::new(FxHashMap::default());
-    let mut clipboard = Clipboard::new();
+    let mut clipboard = Clipboard::connect(&display_handle);
 
     #[cfg(all(feature = "linux-theme-detection", target_os = "linux"))]
     let mut system_theme = {
