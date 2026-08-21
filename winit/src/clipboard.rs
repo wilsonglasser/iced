@@ -29,6 +29,12 @@ mod platform {
         Connected {
             clipboard: Arc<Mutex<arboard::Clipboard>>,
         },
+        #[cfg(all(target_os = "linux", feature = "wayland"))]
+        WaylandDataDevice {
+            clipboard: Arc<Mutex<smithay_clipboard::Clipboard>>,
+            // The raw `wl_display` handed to `smithay_clipboard` must outlive it.
+            _display_handle: winit::event_loop::OwnedDisplayHandle,
+        },
         Unavailable,
     }
 
@@ -47,6 +53,49 @@ mod platform {
             Clipboard { state }
         }
 
+        /// Creates a new [`Clipboard`] for the display behind the given handle.
+        ///
+        /// On Wayland sessions whose compositor does not offer the data-control
+        /// protocol (ChromeOS's sommelier, Weston, Mutter < 47), `arboard` would
+        /// silently fall back to a windowless X11 connection whose selection never
+        /// reaches the compositor's clipboard; this constructor detects that case
+        /// and uses a data-device clipboard tied to our own seat instead.
+        pub fn connect(
+            display_handle: &winit::event_loop::OwnedDisplayHandle,
+        ) -> Self {
+            #[cfg(all(target_os = "linux", feature = "wayland"))]
+            {
+                use raw_window_handle::{HasDisplayHandle as _, RawDisplayHandle};
+
+                if let Ok(handle) = display_handle.display_handle()
+                    && let RawDisplayHandle::Wayland(wayland) = handle.as_raw()
+                    && !data_control_available()
+                {
+                    // SAFETY: the display pointer stays valid for the
+                    // lifetime of the `OwnedDisplayHandle` clone stored
+                    // alongside the clipboard.
+                    #[allow(unsafe_code)]
+                    let clipboard = unsafe {
+                        smithay_clipboard::Clipboard::new(
+                            wayland.display.as_ptr(),
+                        )
+                    };
+
+                    return Clipboard {
+                        state: State::WaylandDataDevice {
+                            clipboard: Arc::new(Mutex::new(clipboard)),
+                            _display_handle: display_handle.clone(),
+                        },
+                    };
+                }
+            }
+
+            #[cfg(not(all(target_os = "linux", feature = "wayland")))]
+            let _ = display_handle;
+
+            Self::new()
+        }
+
         /// Reads the current content of the [`Clipboard`] as text.
         pub fn read(
             &self,
@@ -54,12 +103,55 @@ mod platform {
             kind: Kind,
             callback: impl FnOnce(Result<Content, Error>) + Send + 'static,
         ) {
-            let State::Connected { clipboard } = &self.state else {
-                callback(Err(Error::ClipboardUnavailable));
-                return;
-            };
+            let clipboard = match &self.state {
+                State::Connected { clipboard } => clipboard.clone(),
+                #[cfg(all(target_os = "linux", feature = "wayland"))]
+                State::WaylandDataDevice { clipboard, .. } => {
+                    let clipboard = clipboard.clone();
 
-            let clipboard = clipboard.clone();
+                    let _ = thread::spawn(move || {
+                        let Ok(clipboard) = clipboard.lock() else {
+                            callback(Err(Error::ClipboardUnavailable));
+                            return;
+                        };
+
+                        let result = match kind {
+                            Kind::Text => {
+                                let contents = match clipboard_kind {
+                                    ClipboardKind::Standard => clipboard.load(),
+                                    ClipboardKind::Primary => {
+                                        clipboard.load_primary()
+                                    }
+                                };
+
+                                contents.map(Content::Text).map_err(|error| {
+                                    log::debug!(
+                                        "wayland clipboard read failed: {error}"
+                                    );
+
+                                    Error::ContentNotAvailable
+                                })
+                            }
+                            kind => {
+                                log::warn!(
+                                    "unsupported clipboard kind on the wayland \
+                                     data-device fallback: {kind:?}"
+                                );
+
+                                Err(Error::ContentNotAvailable)
+                            }
+                        };
+
+                        callback(result);
+                    });
+
+                    return;
+                }
+                State::Unavailable => {
+                    callback(Err(Error::ClipboardUnavailable));
+                    return;
+                }
+            };
 
             let _ = thread::spawn(move || {
                 let Ok(mut clipboard) = clipboard.lock() else {
@@ -102,12 +194,51 @@ mod platform {
             content: Content,
             callback: impl FnOnce(Result<(), Error>) + Send + 'static,
         ) {
-            let State::Connected { clipboard } = &self.state else {
-                callback(Err(Error::ClipboardUnavailable));
-                return;
-            };
+            let clipboard = match &self.state {
+                State::Connected { clipboard } => clipboard.clone(),
+                #[cfg(all(target_os = "linux", feature = "wayland"))]
+                State::WaylandDataDevice { clipboard, .. } => {
+                    let clipboard = clipboard.clone();
 
-            let clipboard = clipboard.clone();
+                    let _ = thread::spawn(move || {
+                        let Ok(clipboard) = clipboard.lock() else {
+                            callback(Err(Error::ClipboardUnavailable));
+                            return;
+                        };
+
+                        let result = match content {
+                            Content::Text(text) => {
+                                match clipboard_kind {
+                                    ClipboardKind::Standard => {
+                                        clipboard.store(text);
+                                    }
+                                    ClipboardKind::Primary => {
+                                        clipboard.store_primary(text);
+                                    }
+                                }
+
+                                Ok(())
+                            }
+                            content => {
+                                log::warn!(
+                                    "unsupported clipboard content on the \
+                                     wayland data-device fallback: {content:?}"
+                                );
+
+                                Err(Error::ClipboardUnavailable)
+                            }
+                        };
+
+                        callback(result);
+                    });
+
+                    return;
+                }
+                State::Unavailable => {
+                    callback(Err(Error::ClipboardUnavailable));
+                    return;
+                }
+            };
 
             let _ = thread::spawn(move || {
                 let Ok(mut clipboard) = clipboard.lock() else {
@@ -138,6 +269,16 @@ mod platform {
                 callback(result);
             });
         }
+    }
+
+    /// Whether the Wayland compositor offers a data-control protocol
+    /// (`zwlr_data_control_manager_v1` or `ext_data_control_manager_v1`),
+    /// which is the only protocol `arboard` speaks on Wayland.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    fn data_control_available() -> bool {
+        // `Ok(_)` means the data-control manager itself was found, regardless
+        // of whether the primary selection is supported on top of it.
+        wl_clipboard_rs::utils::is_primary_selection_supported().is_ok()
     }
 
     #[cfg(target_os = "linux")]
@@ -197,6 +338,13 @@ mod platform {
         /// Creates a new [`Clipboard`] for the given window.
         pub fn new() -> Self {
             Self
+        }
+
+        /// Creates a new [`Clipboard`] for the display behind the given handle.
+        pub fn connect(
+            _display_handle: &winit::event_loop::OwnedDisplayHandle,
+        ) -> Self {
+            Self::new()
         }
 
         /// Reads the current content of the [`Clipboard`] as text.
