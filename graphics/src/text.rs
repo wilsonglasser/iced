@@ -296,6 +296,8 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
         RwLock::new(FontSystem {
             raw,
             loaded_fonts: HashSet::new(),
+            #[cfg(target_os = "windows")]
+            aliased_cjk_families: HashSet::new(),
             version: Version::default(),
         })
     })
@@ -305,6 +307,11 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
 pub struct FontSystem {
     raw: cosmic_text::FontSystem,
     loaded_fonts: HashSet<usize>,
+    /// Windows Han fallback-family names that already got an alias (see
+    /// [`FontSystem::alias_windows_cjk`]), so re-loading the same font
+    /// bytes does not register a duplicate alias face.
+    #[cfg(target_os = "windows")]
+    aliased_cjk_families: HashSet<String>,
     version: Version,
 }
 
@@ -324,14 +331,62 @@ impl FontSystem {
             }
         }
 
-        let _ = self
+        let ids = self
             .raw
             .db_mut()
             .load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(
                 bytes.into_owned(),
             )));
 
+        #[cfg(target_os = "windows")]
+        self.alias_windows_cjk(&ids);
+
         self.version = Version(self.version.0 + 1);
+    }
+
+    /// Windows-only: re-register the app's on-demand CJK faces under
+    /// the Han script-fallback family cosmic-text consults for their
+    /// locale, at a Semibold weight.
+    ///
+    /// cosmic-text's `Script::Han` fallback on Windows only accepts
+    /// faces whose family is in the platform list (`"Microsoft YaHei
+    /// UI"` for zh-CN, `"Yu Gothic"` for ja, `"Malgun Gothic"` for ko,
+    /// `"Microsoft JhengHei UI"` for zh-TW) at the requested weight. A
+    /// variable CJK face loaded under its own family name (`"Noto Sans
+    /// SC"`) is never consulted, so Semibold UI text falls back
+    /// per-character to whatever system face happens to match the
+    /// weight — on Windows that mixes Japanese `Yu Gothic UI` and
+    /// Chinese `DengXian` glyphs on one line, and the two fonts sit at
+    /// different baselines so the characters look vertically offset.
+    /// Re-registering the downloaded face under the fallback family at
+    /// weight 600 makes every Han codepoint shape from that one face.
+    #[cfg(target_os = "windows")]
+    fn alias_windows_cjk(&mut self, ids: &[cosmic_text::fontdb::ID]) {
+        for id in ids {
+            let Some(face) = self.raw.db().face(*id).cloned() else {
+                continue;
+            };
+            let Some(fallback) = face
+                .families
+                .iter()
+                .find_map(|(name, _)| windows_han_fallback(name))
+            else {
+                continue;
+            };
+
+            if !self.aliased_cjk_families.insert(fallback.to_string()) {
+                continue;
+            }
+
+            let mut alias = face;
+            alias.families = vec![(
+                fallback.to_string(),
+                cosmic_text::fontdb::Language::English_UnitedStates,
+            )];
+            alias.weight = cosmic_text::fontdb::Weight(600);
+
+            let _ = self.raw.db_mut().push_face_info(alias);
+        }
     }
 
     /// Returns an iterator over the family names of all font faces
@@ -350,6 +405,24 @@ impl FontSystem {
     pub fn version(&self) -> Version {
         self.version
     }
+}
+
+/// Maps a downloaded CJK face's family name to the Windows Han
+/// script-fallback family for that locale. Mirrors cosmic-text's
+/// `han_unification` (its `windows.rs` fallback list).
+#[cfg(target_os = "windows")]
+fn windows_han_fallback(family: &str) -> Option<&'static str> {
+    Some(match family {
+        "Noto Sans SC" => "Microsoft YaHei UI",
+        "Noto Sans TC" | "Noto Sans HK" => "Microsoft JhengHei UI",
+        "Noto Sans JP" => "Yu Gothic",
+        "Noto Sans KR" => "Malgun Gothic",
+        "Noto Sans CJK SC" => "Microsoft YaHei UI",
+        "Noto Sans CJK TC" | "Noto Sans CJK HK" => "Microsoft JhengHei UI",
+        "Noto Sans CJK JP" => "Yu Gothic",
+        "Noto Sans CJK KR" => "Malgun Gothic",
+        _ => return None,
+    })
 }
 
 /// A version number.
