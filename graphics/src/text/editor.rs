@@ -295,12 +295,32 @@ impl editor::Editor for Editor {
 
         let selection = match editor.selection() {
             cosmic_text::Selection::None => None,
-            cosmic_text::Selection::Normal(cursor)
-            | cosmic_text::Selection::Line(cursor)
-            | cosmic_text::Selection::Word(cursor) => Some(Position {
+            cosmic_text::Selection::Normal(cursor) => Some(Position {
                 line: cursor.line,
                 index: cursor.index,
             }),
+            cosmic_text::Selection::Line(_) | cosmic_text::Selection::Word(_) => {
+                // A word/line selection stores the caret in both the cursor
+                // and the selection itself, so mirroring it verbatim would
+                // collapse into a zero-width pair once it is translated to
+                // another editor (e.g. the secure-input mirror), and a later
+                // `Backspace` would delete nothing. Recover the actual bounds
+                // instead, with the caret at the end of the word/line.
+                let (start, end) = editor
+                    .selection_bounds()
+                    .expect("word/line selection must have bounds");
+
+                return Cursor {
+                    position: Position {
+                        line: end.line,
+                        index: end.index,
+                    },
+                    selection: Some(Position {
+                        line: start.line,
+                        index: start.index,
+                    }),
+                };
+            }
         };
 
         Cursor {
@@ -1127,5 +1147,113 @@ impl History {
         self.changes.truncate(self.current);
         self.changes.push(change);
         self.current += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::core::text::Editor as _;
+    use super::*;
+
+    fn editor_with(text: &str) -> Editor {
+        let mut editor = Editor::with_text(text);
+        let mut highlighter = highlighter::PlainText;
+
+        editor.update(
+            Size::new(1000.0, 100.0),
+            Font::default(),
+            Pixels(16.0),
+            LineHeight::Absolute(Pixels(20.0)),
+            Wrapping::None,
+            Alignment::Left,
+            None,
+            &mut highlighter,
+        );
+
+        editor
+    }
+
+    #[test]
+    fn mouse_drag_select_then_backspace_clears_selection() {
+        let mut editor = editor_with("abcdef");
+
+        // Press at the start, drag past the end: selects everything.
+        editor.perform(Action::Click(Point::new(0.0, 0.0)));
+        editor.perform(Action::Drag(Point::new(500.0, 0.0)));
+
+        assert!(
+            editor.cursor().selection.is_some(),
+            "drag should leave a selection"
+        );
+
+        editor.perform(Action::Edit(Edit::Backspace));
+
+        assert!(editor.is_empty(), "backspace should clear the selection");
+    }
+
+    #[test]
+    fn word_selection_cursor_has_distinct_ends() {
+        let mut editor = editor_with("abcdef");
+
+        // A double-click is a click followed by `SelectWord`.
+        editor.perform(Action::Click(Point::new(10.0, 0.0)));
+        editor.perform(Action::SelectWord);
+
+        let cursor = editor.cursor();
+
+        assert!(
+            cursor.selection.is_some(),
+            "word selection should carry a selection end"
+        );
+        assert_ne!(
+            cursor.position,
+            cursor.selection.unwrap(),
+            "word selection must not collapse into a zero-width pair"
+        );
+    }
+
+    #[test]
+    fn word_selection_cursor_spans_the_whole_word() {
+        let mut editor = editor_with("abcdef");
+
+        // Click in the middle of the word: the caret lands mid-word, and
+        // a double-click still selects the whole word.
+        editor.perform(Action::Click(Point::new(10.0, 0.0)));
+        editor.perform(Action::SelectWord);
+
+        let cursor = editor.cursor();
+
+        assert_eq!(
+            cursor.position,
+            Position { line: 0, index: 6 },
+            "caret should sit at the end of the selected word"
+        );
+        assert_eq!(
+            cursor.selection,
+            Some(Position { line: 0, index: 0 }),
+            "selection should start at the beginning of the word"
+        );
+
+        editor.perform(Action::Edit(Edit::Backspace));
+
+        assert!(editor.is_empty(), "backspace should clear the whole word");
+    }
+
+    #[test]
+    fn select_word_then_backspace_clears_selection() {
+        let mut editor = editor_with("abcdef");
+
+        // Click in the middle, then a double-click selects the word.
+        editor.perform(Action::Click(Point::new(40.0, 0.0)));
+        editor.perform(Action::SelectWord);
+
+        assert!(
+            editor.cursor().selection.is_some(),
+            "select word should leave a selection"
+        );
+
+        editor.perform(Action::Edit(Edit::Backspace));
+
+        assert!(editor.is_empty(), "backspace should clear the selection");
     }
 }
