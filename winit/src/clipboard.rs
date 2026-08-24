@@ -32,10 +32,58 @@ mod platform {
         #[cfg(all(target_os = "linux", feature = "wayland"))]
         WaylandDataDevice {
             clipboard: Arc<Mutex<smithay_clipboard::Clipboard>>,
+            /// What `arboard` would have used here: a windowless X11
+            /// connection. Kept for READING only, and only when the
+            /// data device answers with nothing.
+            ///
+            /// A compositor without data-control is usually bridging
+            /// some other clipboard into Wayland, and the bridge can be
+            /// one-way. WSLg is exactly that: its data device hands back
+            /// an empty string for the host clipboard while the same
+            /// content reads correctly over X11. Writing still goes to
+            /// the data device, which is the direction that needed this
+            /// fallback removed in the first place.
+            x11_read: Option<Arc<Mutex<arboard::Clipboard>>>,
             // The raw `wl_display` handed to `smithay_clipboard` must outlive it.
             _display_handle: winit::event_loop::OwnedDisplayHandle,
         },
         Unavailable,
+    }
+
+    /// Read text from the windowless X11 connection kept beside the
+    /// Wayland data device, if there is one.
+    ///
+    /// The error type matches the data device's (`std::io`), because this
+    /// is a second attempt at the same question and the caller only cares
+    /// whether an answer arrived. Having no X11 clipboard and failing to
+    /// read one are the same "no", so both come back as the same `Err`.
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    fn read_x11_text(
+        clipboard: Option<&Arc<Mutex<arboard::Clipboard>>>,
+        clipboard_kind: ClipboardKind,
+    ) -> std::io::Result<String> {
+        use std::io::{Error as IoError, ErrorKind};
+
+        let missing = || {
+            IoError::new(
+                ErrorKind::NotFound,
+                "no X11 clipboard to fall back to",
+            )
+        };
+
+        let Some(clipboard) = clipboard else {
+            return Err(missing());
+        };
+        let Ok(mut clipboard) = clipboard.lock() else {
+            return Err(missing());
+        };
+        get_clipboard(&mut clipboard, clipboard_kind)
+            .text()
+            .map_err(|error| {
+                log::debug!("x11 clipboard read fallback failed: {error}");
+
+                missing()
+            })
     }
 
     impl Clipboard {
@@ -84,6 +132,9 @@ mod platform {
                     return Clipboard {
                         state: State::WaylandDataDevice {
                             clipboard: Arc::new(Mutex::new(clipboard)),
+                            x11_read: arboard::Clipboard::new()
+                                .ok()
+                                .map(|clipboard| Arc::new(Mutex::new(clipboard))),
                             _display_handle: display_handle.clone(),
                         },
                     };
@@ -106,8 +157,11 @@ mod platform {
             let clipboard = match &self.state {
                 State::Connected { clipboard } => clipboard.clone(),
                 #[cfg(all(target_os = "linux", feature = "wayland"))]
-                State::WaylandDataDevice { clipboard, .. } => {
+                State::WaylandDataDevice {
+                    clipboard, x11_read, ..
+                } => {
                     let clipboard = clipboard.clone();
+                    let x11_read = x11_read.clone();
 
                     let _ = thread::spawn(move || {
                         let Ok(clipboard) = clipboard.lock() else {
@@ -121,6 +175,31 @@ mod platform {
                                     ClipboardKind::Standard => clipboard.load(),
                                     ClipboardKind::Primary => {
                                         clipboard.load_primary()
+                                    }
+                                };
+                                // EMPTY counts as no answer, not as an
+                                // empty clipboard. A compositor without
+                                // data-control is usually bridging another
+                                // clipboard in, and the bridge can be
+                                // one-way: WSLg answers the data device
+                                // with "" for content that reads fine over
+                                // X11. Asking the other side costs nothing
+                                // when the clipboard really is empty,
+                                // because then it answers empty too.
+                                let contents = match contents {
+                                    Ok(text) if !text.is_empty() => Ok(text),
+                                    other => {
+                                        if let Err(error) = &other {
+                                            log::debug!(
+                                                "wayland clipboard read failed: \
+                                                 {error}"
+                                            );
+                                        }
+                                        read_x11_text(
+                                            x11_read.as_ref(),
+                                            clipboard_kind,
+                                        )
+                                        .or(other)
                                     }
                                 };
 
