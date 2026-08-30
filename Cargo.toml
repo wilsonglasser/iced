@@ -41,8 +41,6 @@ canvas = ["iced_widget/canvas"]
 qr_code = ["iced_widget/qr_code"]
 # Enables the `markdown` widget
 markdown = ["iced_widget/markdown"]
-# Enables lazy widgets
-lazy = ["iced_widget/lazy"]
 # Enables debug metrics in native platforms (press F12)
 debug = ["iced_winit/debug", "dep:iced_devtools"]
 # Enables time-travel debugging (very experimental!)
@@ -172,7 +170,7 @@ repository = "https://github.com/iced-rs/iced"
 homepage = "https://iced.rs"
 categories = ["gui"]
 keywords = ["gui", "ui", "graphics", "interface", "widgets"]
-rust-version = "1.92"
+rust-version = "1.93"
 
 [workspace.dependencies]
 iced = { version = "0.15.0-dev", path = "." }
@@ -216,7 +214,6 @@ lyon_path = "1.0"
 mundy = { version = "0.2", default-features = false }
 nom = "8"
 num-traits = "0.2"
-ouroboros = "0.18"
 png = "0.18"
 pulldown-cmark = "0.12"
 qrcode = { version = "0.13", default-features = false }
