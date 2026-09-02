@@ -1,7 +1,7 @@
 //! The state of a [`PaneGrid`].
 //!
 //! [`PaneGrid`]: super::PaneGrid
-use crate::core::{Point, Size};
+use crate::core::{Point, Rectangle, Size};
 use crate::pane_grid::{Axis, Configuration, Direction, Edge, Node, Pane, Region, Split, Target};
 
 use std::borrow::Cow;
@@ -381,6 +381,46 @@ impl Internal {
         }
     }
 
+    /// The region `pane` ends up occupying if it is dropped on `target`.
+    ///
+    /// The drop is REPLAYED on a copy of the layout instead of being
+    /// predicted from the target's current bounds, because the two disagree.
+    /// [`State::drop`] closes the dragged pane before splitting the target,
+    /// and closing promotes the sibling, so the target has already grown by
+    /// the time it is split; an [`Edge`] target does not split the band the
+    /// cursor is in at all, it re-splits the root. Replaying keeps whatever
+    /// [`State::drop`] does as the only account of where a pane lands, which
+    /// is what stops a preview from drifting away from the drop it previews.
+    ///
+    /// The rectangle is relative to the layout, like [`Node::pane_regions`].
+    pub(super) fn drop_region(
+        &self,
+        pane: Pane,
+        target: Target,
+        spacing: f32,
+        min_size: f32,
+        size: Size,
+    ) -> Option<Rectangle> {
+        let mut replay = State {
+            panes: self
+                .layout
+                .pane_regions(spacing, min_size, size)
+                .into_keys()
+                .map(|pane| (pane, ()))
+                .collect(),
+            internal: self.clone(),
+        };
+
+        replay.drop(pane, target);
+
+        replay
+            .internal
+            .layout
+            .pane_regions(spacing, min_size, size)
+            .get(&pane)
+            .copied()
+    }
+
     pub(super) fn layout(&self) -> Cow<'_, Node> {
         match self.maximized {
             Some(pane) => Cow::Owned(Node::Pane(pane)),
@@ -437,6 +477,209 @@ impl Action {
         match *self {
             Action::Resizing { split, axis, .. } => Some((split, axis)),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pane_grid::{Edge, Region};
+
+    const GRID: Size = Size::new(1000.0, 500.0);
+    const SPACING: f32 = 0.0;
+    const MIN_SIZE: f32 = 50.0;
+
+    fn assert_rect(left: Rectangle, right: Rectangle) {
+        let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+
+        assert!(
+            close(left.x, right.x)
+                && close(left.y, right.y)
+                && close(left.width, right.width)
+                && close(left.height, right.height),
+            "{left:?} != {right:?}"
+        );
+    }
+
+    /// Two panes side by side, each 500 wide.
+    fn side_by_side() -> State<()> {
+        State::with_configuration(Configuration::Split {
+            axis: Axis::Vertical,
+            ratio: 0.5,
+            a: Box::new(Configuration::Pane(())),
+            b: Box::new(Configuration::Pane(())),
+        })
+    }
+
+    /// Two panes sharing the left two thirds, one taking the right third.
+    fn two_then_one() -> State<()> {
+        State::with_configuration(Configuration::Split {
+            axis: Axis::Vertical,
+            ratio: 2.0 / 3.0,
+            a: Box::new(Configuration::Split {
+                axis: Axis::Vertical,
+                ratio: 0.5,
+                a: Box::new(Configuration::Pane(())),
+                b: Box::new(Configuration::Pane(())),
+            }),
+            b: Box::new(Configuration::Pane(())),
+        })
+    }
+
+    fn regions(state: &State<()>) -> BTreeMap<Pane, Rectangle> {
+        state.internal.layout.pane_regions(SPACING, MIN_SIZE, GRID)
+    }
+
+    /// Dropping on a pane's edge splits the target AFTER the dragged pane is
+    /// closed, and closing promotes the sibling. Here that hands the whole
+    /// grid to the target, so the arriving pane takes half of 1000 rather
+    /// than half of the 500 the target measured while the drag was live.
+    #[test]
+    fn dropping_on_a_pane_edge_takes_half_of_what_the_target_grows_into() {
+        let state = side_by_side();
+        let panes: Vec<Pane> = regions(&state).into_keys().collect();
+        let (left, right) = (panes[0], panes[1]);
+
+        let region = state
+            .internal
+            .drop_region(
+                right,
+                Target::Pane(left, Region::Edge(Edge::Right)),
+                SPACING,
+                MIN_SIZE,
+                GRID,
+            )
+            .expect("the dragged pane lands somewhere");
+
+        assert_rect(
+            region,
+            Rectangle {
+                x: 500.0,
+                y: 0.0,
+                width: 500.0,
+                height: 500.0,
+            },
+        );
+    }
+
+    /// A grid edge re-splits the ROOT, so the arriving pane takes half the
+    /// grid. The band the cursor has to be in to aim at that edge is a
+    /// twenty-fifth of it, which is where you aim and not what you get.
+    #[test]
+    fn dropping_on_a_grid_edge_takes_half_the_grid() {
+        let state = side_by_side();
+        let panes: Vec<Pane> = regions(&state).into_keys().collect();
+
+        let region = state
+            .internal
+            .drop_region(panes[1], Target::Edge(Edge::Left), SPACING, MIN_SIZE, GRID)
+            .expect("the dragged pane lands somewhere");
+
+        assert_rect(
+            region,
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 500.0,
+                height: 500.0,
+            },
+        );
+    }
+
+    /// The error is however much the target grows, so it is not a two-pane
+    /// quirk. The pane leaving is the target's uncle here, and the target
+    /// still goes from a third of the grid to a half of it.
+    #[test]
+    fn a_target_that_grows_by_less_than_double_moves_by_less() {
+        let state = two_then_one();
+        let panes: Vec<Pane> = regions(&state).into_keys().collect();
+        let (first, last) = (panes[0], panes[2]);
+
+        let region = state
+            .internal
+            .drop_region(
+                last,
+                Target::Pane(first, Region::Edge(Edge::Right)),
+                SPACING,
+                MIN_SIZE,
+                GRID,
+            )
+            .expect("the dragged pane lands somewhere");
+
+        assert_rect(
+            region,
+            Rectangle {
+                x: 250.0,
+                y: 0.0,
+                width: 250.0,
+                height: 500.0,
+            },
+        );
+    }
+
+    /// Dropping on a pane's middle swaps the two, which is the one target
+    /// that closes nothing, so the arriving pane takes the target's own
+    /// rectangle exactly as it stands.
+    #[test]
+    fn dropping_on_a_pane_center_takes_the_target_where_it_is() {
+        let state = two_then_one();
+        let panes: Vec<Pane> = regions(&state).into_keys().collect();
+        let (first, last) = (panes[0], panes[2]);
+        let target = regions(&state)[&first];
+
+        let region = state
+            .internal
+            .drop_region(
+                last,
+                Target::Pane(first, Region::Center),
+                SPACING,
+                MIN_SIZE,
+                GRID,
+            )
+            .expect("the dragged pane lands somewhere");
+
+        assert_rect(region, target);
+    }
+
+    /// The preview is the drop, replayed. This is what keeps it that way:
+    /// every target of every arrangement is previewed and then performed,
+    /// and the two rectangles have to agree.
+    #[test]
+    fn every_preview_is_where_the_pane_actually_lands() {
+        let edges = [Edge::Top, Edge::Bottom, Edge::Left, Edge::Right];
+
+        for build in [side_by_side, two_then_one] {
+            let state = build();
+            let panes: Vec<Pane> = regions(&state).into_keys().collect();
+
+            let targets = panes
+                .iter()
+                .flat_map(|pane| {
+                    edges
+                        .iter()
+                        .map(|edge| Target::Pane(*pane, Region::Edge(*edge)))
+                        .chain(std::iter::once(Target::Pane(*pane, Region::Center)))
+                })
+                .chain(edges.iter().map(|edge| Target::Edge(*edge)));
+
+            for dragged in &panes {
+                for target in targets.clone() {
+                    if matches!(target, Target::Pane(pane, _) if pane == *dragged) {
+                        continue;
+                    }
+
+                    let previewed = state
+                        .internal
+                        .drop_region(*dragged, target, SPACING, MIN_SIZE, GRID)
+                        .expect("the dragged pane lands somewhere");
+
+                    let mut performed = build();
+                    performed.drop(*dragged, target);
+
+                    assert_rect(previewed, regions(&performed)[dragged]);
+                }
+            }
         }
     }
 }
