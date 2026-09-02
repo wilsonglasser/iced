@@ -863,14 +863,20 @@ where
                 self.min_size,
                 bounds.size(),
             ) {
-                renderer.fill_quad(
-                    renderer::Quad {
-                        bounds: region + Vector::new(bounds.x, bounds.y),
-                        border: style.hovered_region.border,
-                        ..renderer::Quad::default()
-                    },
-                    style.hovered_region.background,
-                );
+                // In its own layer, because within one layer a renderer
+                // draws by primitive KIND rather than by call order, so a
+                // pane whose content is a mesh or an image (a canvas, a
+                // picture) covers a quad filled after it.
+                renderer.with_layer(bounds, |renderer| {
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: region + Vector::new(bounds.x, bounds.y),
+                            border: style.hovered_region.border,
+                            ..renderer::Quad::default()
+                        },
+                        style.hovered_region.background,
+                    );
+                });
             }
         }
 
