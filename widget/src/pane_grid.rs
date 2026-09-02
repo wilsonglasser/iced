@@ -790,6 +790,13 @@ where
 
         let style = Catalog::style(theme, &self.class);
 
+        // What the drag is currently proposing, resolved inside the loop
+        // below and painted AFTER it. A drop's rectangle can reach outside
+        // the target's own bounds, since an arriving pane takes half of what
+        // the target grows into once the dragged one is closed, so a quad
+        // filled mid-loop would be drawn over by whatever pane comes next.
+        let mut drop_target = None;
+
         for (((id, content), tree), pane_layout) in self
             .panes
             .iter()
@@ -822,16 +829,7 @@ where
                         && pane_in_edge.is_none()
                         && let Some(region) = layout_region(pane_layout, cursor_position)
                     {
-                        let bounds = layout_region_bounds(pane_layout, region);
-
-                        renderer.fill_quad(
-                            renderer::Quad {
-                                bounds,
-                                border: style.hovered_region.border,
-                                ..renderer::Quad::default()
-                            },
-                            style.hovered_region.background,
-                        );
+                        drop_target = Some(Target::Pane(id, region));
                     }
                 }
                 _ => {
@@ -849,19 +847,31 @@ where
             }
         }
 
-        if dragged_pane.is_some()
-            && let Some(edge) = pane_in_edge
+        // The highlight is where the pane LANDS, not where you aim: both the
+        // thin band an edge is hit by and the half of a pane a region is hit
+        // by are smaller than what a drop actually produces. `drop_region`
+        // replays the drop rather than restating it.
+        if let Some((dragging, _)) = dragged_pane
+            && let Some(target) = pane_in_edge.map(Target::Edge).or(drop_target)
         {
-            let bounds = edge_bounds(layout, edge);
+            let bounds = layout.bounds();
 
-            renderer.fill_quad(
-                renderer::Quad {
-                    bounds,
-                    border: style.hovered_region.border,
-                    ..renderer::Quad::default()
-                },
-                style.hovered_region.background,
-            );
+            if let Some(region) = self.internal.drop_region(
+                dragging,
+                target,
+                self.spacing,
+                self.min_size,
+                bounds.size(),
+            ) {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: region + Vector::new(bounds.x, bounds.y),
+                        border: style.hovered_region.border,
+                        ..renderer::Quad::default()
+                    },
+                    style.hovered_region.background,
+                );
+            }
         }
 
         if dragged_pane.is_none()
@@ -1091,63 +1101,6 @@ fn in_edge(layout: Layout<'_>, cursor: Point) -> Option<Edge> {
         Some(Edge::Bottom)
     } else {
         None
-    }
-}
-
-fn edge_bounds(layout: Layout<'_>, edge: Edge) -> Rectangle {
-    let bounds = layout.bounds();
-
-    let height_thickness = bounds.height / THICKNESS_RATIO;
-    let width_thickness = bounds.width / THICKNESS_RATIO;
-    let thickness = height_thickness.min(width_thickness);
-
-    match edge {
-        Edge::Top => Rectangle {
-            height: thickness,
-            ..bounds
-        },
-        Edge::Left => Rectangle {
-            width: thickness,
-            ..bounds
-        },
-        Edge::Right => Rectangle {
-            x: bounds.x + bounds.width - thickness,
-            width: thickness,
-            ..bounds
-        },
-        Edge::Bottom => Rectangle {
-            y: bounds.y + bounds.height - thickness,
-            height: thickness,
-            ..bounds
-        },
-    }
-}
-
-fn layout_region_bounds(layout: Layout<'_>, region: Region) -> Rectangle {
-    let bounds = layout.bounds();
-
-    match region {
-        Region::Center => bounds,
-        Region::Edge(edge) => match edge {
-            Edge::Top => Rectangle {
-                height: bounds.height / 2.0,
-                ..bounds
-            },
-            Edge::Left => Rectangle {
-                width: bounds.width / 2.0,
-                ..bounds
-            },
-            Edge::Right => Rectangle {
-                x: bounds.x + bounds.width / 2.0,
-                width: bounds.width / 2.0,
-                ..bounds
-            },
-            Edge::Bottom => Rectangle {
-                y: bounds.y + bounds.height / 2.0,
-                height: bounds.height / 2.0,
-                ..bounds
-            },
-        },
     }
 }
 
