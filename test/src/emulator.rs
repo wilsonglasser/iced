@@ -598,18 +598,24 @@ impl<P: Program + 'static> Emulator<P> {
             &[core::Event::Window(window::Event::RedrawRequested(
                 Instant::now(),
             ))],
-            mouse::Cursor::Unavailable,
+            self.cursor,
             &mut self.renderer,
             &mut shell::Bus::new(),
         );
 
+        // The shot is taken with the cursor where the emulator has put
+        // it, which is the cursor every other dispatch already uses.
+        // Anything the pointer decides at DRAW time (a hover style, a
+        // drag preview, a highlighted drop target) is otherwise absent
+        // from the picture while being present in the running program,
+        // and a screenshot is the only way those are asserted at all.
         user_interface.draw(
             &mut self.renderer,
             theme,
             &renderer::Style {
                 text_color: style.text_color,
             },
-            mouse::Cursor::Unavailable,
+            self.cursor,
         );
 
         // Hand the widget-state cache back; taking it without restoring
