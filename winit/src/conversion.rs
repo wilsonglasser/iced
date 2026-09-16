@@ -268,6 +268,28 @@ pub fn window_event(
             // `MouseScrollDelta` is `#[non_exhaustive]` since `winit 0.31`.
             _ => None,
         },
+        // A touchpad pinch, where the platform delivers one (macOS and Wayland; Windows folds it
+        // into a Ctrl + wheel before the window sees it). The delta is a magnification fraction
+        // relative to the previous event of the gesture, and winit says it may be NaN: such a
+        // move carries nothing and is dropped, while the phase events (delta 0) always pass, since
+        // a consumer accumulating across a gesture resets on them.
+        WindowEvent::PinchGesture { delta, phase, .. } => {
+            let phase = match phase {
+                winit::event::TouchPhase::Started => mouse::GesturePhase::Started,
+                winit::event::TouchPhase::Moved => mouse::GesturePhase::Moved,
+                winit::event::TouchPhase::Ended => mouse::GesturePhase::Ended,
+                winit::event::TouchPhase::Cancelled => mouse::GesturePhase::Cancelled,
+            };
+
+            if phase == mouse::GesturePhase::Moved && delta.is_nan() {
+                return None;
+            }
+
+            Some(Event::Mouse(mouse::Event::Pinched {
+                delta: delta as f32,
+                phase,
+            }))
+        }
         // Ignore keyboard presses/releases during window focus/unfocus
         WindowEvent::KeyboardInput { is_synthetic, .. } if is_synthetic => None,
         WindowEvent::KeyboardInput { event, .. } => Some(Event::Keyboard({

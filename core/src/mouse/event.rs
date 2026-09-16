@@ -33,6 +33,35 @@ pub enum Event {
         /// The scroll movement.
         delta: ScrollDelta,
     },
+
+    /// A two-finger pinch on a touchpad, the magnification gesture.
+    ///
+    /// Only some platforms deliver it as a gesture (macOS and Wayland
+    /// do; Windows turns a precision-touchpad pinch into a
+    /// Ctrl + [`Event::WheelScrolled`] before the window sees it).
+    Pinched {
+        /// The change in magnification since the previous event of the
+        /// same gesture: positive when the fingers spread (zoom in),
+        /// negative when they close (zoom out). `0.0` on the phase
+        /// events that open and close a gesture.
+        delta: f32,
+        /// Where in the gesture this event sits.
+        phase: GesturePhase,
+    },
+}
+
+/// The lifecycle of a touchpad gesture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GesturePhase {
+    /// The fingers landed; the gesture begins.
+    Started,
+    /// The fingers moved; the event carries a delta.
+    Moved,
+    /// The fingers lifted; the gesture is complete.
+    Ended,
+    /// The system abandoned the gesture (another finger landed, the
+    /// window lost the pointer, ...).
+    Cancelled,
 }
 
 /// A scroll movement.
