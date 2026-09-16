@@ -62,6 +62,16 @@ impl Interaction {
                     delta: *delta,
                     target: None,
                 },
+                // Only the moves carry a delta; the phase events that open
+                // and close a gesture are replayed around every recorded
+                // pinch by `events`, so recording them would double them.
+                mouse::Event::Pinched {
+                    delta,
+                    phase: mouse::GesturePhase::Moved,
+                } => Mouse::Pinch {
+                    delta: *delta,
+                    target: None,
+                },
                 _ => None?,
             }),
             Event::Keyboard(keyboard) => Self::Keyboard(match keyboard {
@@ -219,6 +229,24 @@ impl Interaction {
                         None,
                     )
                 }
+                // A real pinch arrives as dozens of small moves; one
+                // gesture records as one line, the way a scroll does.
+                (
+                    Mouse::Pinch {
+                        delta: current,
+                        target: current_at,
+                    },
+                    Mouse::Pinch {
+                        delta: next,
+                        target: next_at,
+                    },
+                ) if next_at.is_none() || next_at == current_at => (
+                    Self::Mouse(Mouse::Pinch {
+                        delta: current + next,
+                        target: current_at,
+                    }),
+                    None,
+                ),
                 (
                     Mouse::Press {
                         button: press,
@@ -354,6 +382,19 @@ impl Interaction {
                 } => {
                     vec![Event::Mouse(mouse::Event::WheelScrolled { delta: *delta })]
                 }
+                // One instruction is one whole gesture: the phase events
+                // around the move are what a consumer accumulating across
+                // a gesture resets on, so a replay exercises that path too.
+                Mouse::Pinch { delta, target } => {
+                    let mut events = Vec::with_capacity(4);
+
+                    if let Some(at) = target {
+                        events.push(mouse_move_(find_target(at)?));
+                    }
+
+                    events.extend(pinch_gesture(*delta));
+                    events
+                }
             },
             Interaction::Keyboard(keyboard) => match keyboard {
                 Keyboard::Press(key) => vec![key_press(*key)],
@@ -371,6 +412,26 @@ impl Interaction {
             },
         })
     }
+}
+
+/// The three events of one pinch gesture with a single move of `delta`.
+fn pinch_gesture(delta: f32) -> [Event; 3] {
+    use mouse::GesturePhase;
+
+    [
+        Event::Mouse(mouse::Event::Pinched {
+            delta: 0.0,
+            phase: GesturePhase::Started,
+        }),
+        Event::Mouse(mouse::Event::Pinched {
+            delta,
+            phase: GesturePhase::Moved,
+        }),
+        Event::Mouse(mouse::Event::Pinched {
+            delta: 0.0,
+            phase: GesturePhase::Ended,
+        }),
+    ]
 }
 
 /// Sums two [`mouse::ScrollDelta`]s of the same unit, or returns
@@ -438,6 +499,14 @@ pub enum Mouse {
         /// The location of the scroll.
         target: Option<Target>,
     },
+    /// A touchpad pinch: one whole gesture magnifying by `delta`
+    /// (positive spreads the fingers, negative closes them).
+    Pinch {
+        /// The change in magnification over the gesture.
+        delta: f32,
+        /// The location of the pinch.
+        target: Option<Target>,
+    },
 }
 
 impl fmt::Display for Mouse {
@@ -457,6 +526,15 @@ impl fmt::Display for Mouse {
             }
             Mouse::Scroll { delta, target } => {
                 write!(f, "scroll {}", format::scroll_delta(*delta))?;
+
+                if let Some(target) = target {
+                    write!(f, " {target}")?;
+                }
+
+                Ok(())
+            }
+            Mouse::Pinch { delta, target } => {
+                write!(f, "pinch {delta:.2}")?;
 
                 if let Some(target) = target {
                     write!(f, " {target}")?;
@@ -779,8 +857,21 @@ mod parser {
             mouse_press,
             mouse_release,
             mouse_scroll,
+            mouse_pinch,
         ))
         .parse(input)
+    }
+
+    fn mouse_pinch(input: &str) -> IResult<&str, Mouse> {
+        let (input, _) = tag("pinch ")(input)?;
+        // The COMPLETE float: the delta can end the line, and the
+        // module-level streaming parser answers `Incomplete` there
+        // rather than failing, which `finish()` turns into a panic
+        // (same trap as the function-key digits).
+        let (input, delta) = nom::number::complete::float(input)?;
+        let (input, at) = opt(target).parse(input)?;
+
+        Ok((input, Mouse::Pinch { delta, target: at }))
     }
 
     fn mouse_scroll(input: &str) -> IResult<&str, Mouse> {
@@ -1120,6 +1211,74 @@ mod tests {
     }
 
     #[test]
+    fn it_parses_pinches() {
+        assert_eq!(
+            parse("pinch 0.35"),
+            Instruction::Interact(Interaction::Mouse(Mouse::Pinch {
+                delta: 0.35,
+                target: None,
+            }))
+        );
+
+        assert_eq!(
+            parse("pinch -0.20 (600.00, 400.00)"),
+            Instruction::Interact(Interaction::Mouse(Mouse::Pinch {
+                delta: -0.2,
+                target: Some(Target::Point(Point::new(600.0, 400.0))),
+            }))
+        );
+
+        roundtrip("pinch 0.35");
+        roundtrip("pinch -0.20 (600.00, 400.00)");
+        roundtrip("pinch 1.00 #terminal");
+    }
+
+    /// One instruction replays as one whole gesture: the phase events
+    /// around the move are what a consumer accumulating across a gesture
+    /// resets on.
+    #[test]
+    fn a_pinch_replays_as_a_whole_gesture() {
+        use mouse::GesturePhase;
+
+        let events = Interaction::Mouse(Mouse::Pinch {
+            delta: 0.35,
+            target: None,
+        })
+        .events(|_| None)
+        .expect("no target to resolve");
+
+        assert_eq!(
+            events,
+            vec![
+                Event::Mouse(mouse::Event::Pinched {
+                    delta: 0.0,
+                    phase: GesturePhase::Started
+                }),
+                Event::Mouse(mouse::Event::Pinched {
+                    delta: 0.35,
+                    phase: GesturePhase::Moved
+                }),
+                Event::Mouse(mouse::Event::Pinched {
+                    delta: 0.0,
+                    phase: GesturePhase::Ended
+                }),
+            ]
+        );
+
+        // The recorder keeps the moves only, so a replayed gesture is
+        // not recorded with its phases doubled.
+        assert_eq!(
+            Interaction::from_event(&events[1]),
+            Some(Interaction::Mouse(Mouse::Pinch {
+                delta: 0.35,
+                target: None,
+            }))
+        );
+        assert_eq!(Interaction::from_event(&events[0]), None);
+        assert_eq!(Interaction::from_event(&events[2]), None);
+    }
+
+    #[test]
     fn it_parses_shortcuts() {
         assert_eq!(
             parse("type ctrl+k"),
@@ -1196,6 +1355,27 @@ mod tests {
         roundtrip("click middle (10.00, 20.00)");
         roundtrip("click back \"Files\"");
         roundtrip("click forward \"Files\"");
+    }
+
+    #[test]
+    fn it_merges_pinches() {
+        let (merged, rest) = Interaction::Mouse(Mouse::Pinch {
+            delta: 0.25,
+            target: None,
+        })
+        .merge(Interaction::Mouse(Mouse::Pinch {
+            delta: 0.5,
+            target: None,
+        }));
+
+        assert_eq!(
+            merged,
+            Interaction::Mouse(Mouse::Pinch {
+                delta: 0.75,
+                target: None,
+            })
+        );
+        assert!(rest.is_none());
     }
 
     #[test]
