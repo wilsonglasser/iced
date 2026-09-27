@@ -618,8 +618,6 @@ impl<P: Program + 'static> Emulator<P> {
             self.cursor,
         );
 
-        // Hand the widget-state cache back; taking it without restoring
-        // would poison the next instruction with an unwrap on `None`.
         self.cache = Some(user_interface.into_cache());
 
         let physical_size = Size::new(

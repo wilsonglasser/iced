@@ -7,7 +7,9 @@ use crate::text::editor;
 use crate::text::paragraph;
 use crate::text::{self, Alignment, Editor, LineHeight, Position, Text, Wrapping};
 use crate::widget::operation::{Focusable, TextInput};
-use crate::{Color, Event, InputMethod, Length, Padding, Pixels, Point, Rectangle, Shell};
+use crate::{
+    Color, Event, Font, InputMethod, Length, Padding, Pixels, Point, Rectangle, Shell, Size,
+};
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -24,14 +26,14 @@ pub struct Input<R: text::Renderer> {
     multiline: Option<Wrapping>,
 }
 
-pub struct Layout<'a, Font> {
+pub struct Layout<'a> {
     pub width: Length,
     pub height: Length,
     pub padding: Padding,
     pub placeholder: &'a str,
     pub font: Option<Font>,
     pub size: Option<Pixels>,
-    pub line_height: LineHeight,
+    pub line_height: Option<LineHeight>,
     pub alignment: Alignment,
     pub multiline: Option<Wrapping>,
     pub is_secure: bool,
@@ -70,12 +72,7 @@ impl<R: text::Renderer> Input<R> {
         }
     }
 
-    pub fn layout(
-        &mut self,
-        renderer: &R,
-        limits: &layout::Limits,
-        layout: Layout<'_, R::Font>,
-    ) -> layout::Node {
+    pub fn layout(&mut self, renderer: &R, limits: &layout::Limits, layout: Layout<'_>) -> Size {
         self.padding = layout.padding;
         self.multiline = layout.multiline;
 
@@ -84,8 +81,9 @@ impl<R: text::Renderer> Input<R> {
             .height(layout.height)
             .shrink(layout.padding);
 
-        let font = layout.font.unwrap_or_else(|| renderer.default_font());
-        let size = layout.size.unwrap_or_else(|| renderer.default_size());
+        let font = layout.font.unwrap_or_else(|| renderer.font());
+        let size = layout.size.unwrap_or_else(|| renderer.text_size());
+        let line_height = layout.line_height.unwrap_or_else(|| renderer.line_height());
         let hint_factor = renderer.hint_factor();
 
         if layout.is_secure {
@@ -117,31 +115,22 @@ impl<R: text::Renderer> Input<R> {
         let editor = self.secure.as_mut().unwrap_or(&mut self.editor);
 
         editor.update(
-            limits.max(),
+            limits.bounds(),
             font,
             size,
-            layout.line_height,
+            line_height,
             layout.multiline.unwrap_or(text::Wrapping::None),
             layout.alignment,
             hint_factor,
-            &mut text::highlighter::PlainText,
+            &mut text::parser::PlainText,
         );
 
-        let bounds = match layout.height {
-            Length::Fill
-            | Length::FillPortion(_)
-            | Length::Fixed(_)
-            | Length::Bounded { .. }
-            | Length::Fluid(_) => limits.max(),
-            Length::Shrink | Length::Fit => {
-                limits.resolve(layout.width, layout.height, editor.min_bounds())
-            }
-        };
+        let bounds = limits.resolve(layout.width, layout.height, editor.min_bounds());
 
         let _ = self.placeholder.update(Text {
             content: layout.placeholder,
             font,
-            line_height: layout.line_height,
+            line_height,
             bounds,
             size,
             align_x: layout.alignment,
@@ -152,7 +141,7 @@ impl<R: text::Renderer> Input<R> {
             hint_factor,
         });
 
-        layout::Node::new(bounds.expand(layout.padding))
+        bounds.expand(layout.padding)
     }
 
     pub fn update<Message>(

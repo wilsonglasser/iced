@@ -84,6 +84,7 @@ where
                 exit_on_close_request,
                 surface,
                 surface_version,
+                surface_error_at: None,
                 renderer,
                 mouse_interaction: mouse::Interaction::None,
                 redraw_at: None,
@@ -182,6 +183,7 @@ where
     pub mouse_interaction: mouse::Interaction,
     pub surface: C::Surface,
     pub surface_version: u64,
+    pub surface_error_at: Option<Instant>,
     pub renderer: P::Renderer,
     pub redraw_at: Option<Instant>,
     preedit: Option<Preedit<P::Renderer>>,
@@ -336,7 +338,7 @@ where
 {
     position: Point,
     content: Renderer::Paragraph,
-    spans: Vec<text::Span<'static, (), Renderer::Font>>,
+    spans: Vec<text::Span<'static, ()>>,
 }
 
 impl<Renderer> Preedit<Renderer>
@@ -387,9 +389,9 @@ where
             self.content = Renderer::Paragraph::with_spans(Text {
                 content: &spans,
                 bounds: Size::INFINITE,
-                size: preedit.text_size.unwrap_or_else(|| renderer.default_size()),
-                line_height: text::LineHeight::default(),
-                font: renderer.default_font(),
+                size: preedit.text_size.unwrap_or_else(|| renderer.text_size()),
+                line_height: renderer.line_height(),
+                font: renderer.font(),
                 align_x: text::Alignment::Default,
                 align_y: alignment::Vertical::Top,
                 shaping: text::Shaping::Advanced,

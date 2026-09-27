@@ -19,6 +19,7 @@ use crate::progress_bar::{self, ProgressBar};
 use crate::radio::{self, Radio};
 use crate::scrollable::{self, Scrollable};
 use crate::slider::{self, Slider};
+use crate::sticky::Sticky;
 use crate::text::{self, Text};
 use crate::text_editor::{self, TextEditor};
 use crate::text_input::{self, TextInput};
@@ -615,13 +616,8 @@ where
             self.content.as_widget().size()
         }
 
-        fn layout(
-            &mut self,
-            tree: &mut Tree,
-            renderer: &Renderer,
-            limits: &layout::Limits,
-        ) -> layout::Node {
-            self.content.as_widget_mut().layout(tree, renderer, limits)
+        fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
+            self.content.as_widget_mut().layout(tree, renderer, limits);
         }
 
         fn draw(
@@ -630,7 +626,7 @@ where
             renderer: &mut Renderer,
             theme: &Theme,
             style: &renderer::Style,
-            layout: Layout<'_>,
+            layout: Layout,
             cursor: mouse::Cursor,
             viewport: &Rectangle,
         ) {
@@ -642,20 +638,21 @@ where
         fn operate(
             &mut self,
             tree: &mut Tree,
-            layout: Layout<'_>,
+            layout: Layout,
+            viewport: &Rectangle,
             renderer: &Renderer,
             operation: &mut dyn operation::Operation,
         ) {
             self.content
                 .as_widget_mut()
-                .operate(tree, layout, renderer, operation);
+                .operate(tree, layout, viewport, renderer, operation);
         }
 
         fn update(
             &mut self,
             tree: &mut Tree,
             event: &Event,
-            layout: Layout<'_>,
+            layout: Layout,
             cursor: mouse::Cursor,
             renderer: &Renderer,
             shell: &mut Shell<'_, Message>,
@@ -676,7 +673,7 @@ where
         fn mouse_interaction(
             &self,
             state: &core::widget::Tree,
-            layout: core::Layout<'_>,
+            layout: core::Layout,
             cursor: core::mouse::Cursor,
             viewport: &core::Rectangle,
             renderer: &Renderer,
@@ -696,14 +693,20 @@ where
         fn overlay<'b>(
             &'b mut self,
             state: &'b mut core::widget::Tree,
-            layout: core::Layout<'b>,
+            layout: core::Layout,
             renderer: &Renderer,
             viewport: &Rectangle,
             translation: core::Vector,
-        ) -> Option<core::overlay::Element<'b, Message, Theme, Renderer>> {
-            self.content
-                .as_widget_mut()
-                .overlay(state, layout, renderer, viewport, translation)
+            window: core::Size,
+        ) -> Vec<core::overlay::Element<'b, Message, Theme, Renderer>> {
+            self.content.as_widget_mut().overlay(
+                state,
+                layout,
+                renderer,
+                viewport,
+                translation,
+                window,
+            )
         }
     }
 
@@ -759,24 +762,20 @@ where
             self.base.as_widget().size()
         }
 
-        fn layout(
-            &mut self,
-            tree: &mut Tree,
-            renderer: &Renderer,
-            limits: &layout::Limits,
-        ) -> layout::Node {
-            let base = self
-                .base
+        fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
+            self.base
                 .as_widget_mut()
                 .layout(&mut tree.children[0], renderer, limits);
 
-            let top = self.top.as_widget_mut().layout(
+            let base_size = tree.children[0].size;
+
+            self.top.as_widget_mut().layout(
                 &mut tree.children[1],
                 renderer,
-                &layout::Limits::new(Size::ZERO, base.size()),
+                &layout::Limits::new(Size::ZERO, base_size),
             );
 
-            layout::Node::with_children(base.size(), vec![base, top])
+            tree.size = base_size;
         }
 
         fn draw(
@@ -785,12 +784,12 @@ where
             renderer: &mut Renderer,
             theme: &Theme,
             style: &renderer::Style,
-            layout: Layout<'_>,
+            layout: Layout,
             cursor: mouse::Cursor,
             viewport: &Rectangle,
         ) {
             if let Some(bounds) = layout.bounds().intersection(viewport) {
-                let mut children = layout.children().zip(&tree.children);
+                let mut children = layout.iter(&tree.children);
 
                 let (base_layout, base_tree) = children.next().unwrap();
 
@@ -822,18 +821,19 @@ where
         fn operate(
             &mut self,
             tree: &mut Tree,
-            layout: Layout<'_>,
+            layout: Layout,
+            viewport: &Rectangle,
             renderer: &Renderer,
             operation: &mut dyn operation::Operation,
         ) {
             let children = [&mut self.base, &mut self.top]
                 .into_iter()
-                .zip(layout.children().zip(&mut tree.children));
+                .zip(layout.iter_mut(&mut tree.children));
 
             for (child, (layout, tree)) in children {
                 child
                     .as_widget_mut()
-                    .operate(tree, layout, renderer, operation);
+                    .operate(tree, layout, viewport, renderer, operation);
             }
         }
 
@@ -841,13 +841,13 @@ where
             &mut self,
             tree: &mut Tree,
             event: &Event,
-            layout: Layout<'_>,
+            layout: Layout,
             cursor: mouse::Cursor,
             renderer: &Renderer,
             shell: &mut Shell<'_, Message>,
             viewport: &Rectangle,
         ) {
-            let mut children = layout.children().zip(&mut tree.children);
+            let mut children = layout.iter_mut(&mut tree.children);
             let (base_layout, base_tree) = children.next().unwrap();
             let (top_layout, top_tree) = children.next().unwrap();
 
@@ -859,6 +859,7 @@ where
                 self.top.as_widget_mut().operate(
                     top_tree,
                     top_layout,
+                    viewport,
                     renderer,
                     &mut operation::black_box(&mut count_focused),
                 );
@@ -910,7 +911,7 @@ where
         fn mouse_interaction(
             &self,
             tree: &Tree,
-            layout: Layout<'_>,
+            layout: Layout,
             cursor: mouse::Cursor,
             viewport: &Rectangle,
             renderer: &Renderer,
@@ -918,7 +919,7 @@ where
             [&self.base, &self.top]
                 .into_iter()
                 .rev()
-                .zip(layout.children().rev().zip(tree.children.iter().rev()))
+                .zip(layout.iter(&tree.children).rev())
                 .map(|(child, (layout, tree))| {
                     child
                         .as_widget()
@@ -931,28 +932,32 @@ where
         fn overlay<'b>(
             &'b mut self,
             tree: &'b mut core::widget::Tree,
-            layout: core::Layout<'b>,
+            layout: core::Layout,
             renderer: &Renderer,
             viewport: &Rectangle,
             translation: core::Vector,
-        ) -> Option<core::overlay::Element<'b, Message, Theme, Renderer>> {
+            window: core::Size,
+        ) -> Vec<core::overlay::Element<'b, Message, Theme, Renderer>> {
             let mut overlays = [&mut self.base, &mut self.top]
                 .into_iter()
-                .zip(layout.children().zip(tree.children.iter_mut()))
+                .zip(layout.iter_mut(&mut tree.children))
                 .map(|(child, (layout, tree))| {
-                    child
-                        .as_widget_mut()
-                        .overlay(tree, layout, renderer, viewport, translation)
+                    child.as_widget_mut().overlay(
+                        tree,
+                        layout,
+                        renderer,
+                        viewport,
+                        translation,
+                        window,
+                    )
                 });
 
-            if let Some(base_overlay) = overlays.next()? {
-                return Some(base_overlay);
-            }
+            let base_overlays = overlays.next().unwrap();
+            let top_overlays = overlays.next().unwrap();
 
-            let top_overlay = overlays.next()?;
-            self.is_top_overlay_active = top_overlay.is_some();
+            self.is_top_overlay_active = !top_overlays.is_empty();
 
-            top_overlay
+            base_overlays.into_iter().chain(top_overlays).collect()
         }
     }
 
@@ -1011,6 +1016,40 @@ where
     Renderer: core::text::Renderer,
 {
     Scrollable::new(content)
+}
+
+/// Creates a new [`Sticky`] for the provided content.
+///
+/// The contents of a [`Sticky`] will be displayed on an overlay, inside the
+/// visible bounds, whenever they would otherwise go out of view.
+///
+/// # Example
+/// ```no_run
+/// # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::core::Length::Fill; }
+/// # pub type State = ();
+/// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
+/// use iced::widget::{column, container, scrollable, sticky, space};
+/// use iced::Fill;
+///
+/// enum Message {
+///     // ...
+/// }
+///
+/// fn view(state: &State) -> Element<'_, Message> {
+///     scrollable(column![
+///         sticky(container("I always stay in view!").width(Fill).padding(10)),
+///         space().height(3000),
+///     ]).into()
+/// }
+/// ```
+pub fn sticky<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+) -> Sticky<'a, Message, Theme, Renderer>
+where
+    Theme: 'a,
+    Renderer: core::Renderer + 'a,
+{
+    Sticky::new(content)
 }
 
 /// Creates a new [`Button`] with the provided content.
@@ -1100,19 +1139,17 @@ where
 ///         .into()
 /// }
 /// ```
-pub fn text<'a, Theme, Renderer>(text: impl text::IntoFragment<'a>) -> Text<'a, Theme, Renderer>
+pub fn text<'a, Theme>(text: impl text::IntoFragment<'a>) -> Text<'a, Theme>
 where
     Theme: text::Catalog + 'a,
-    Renderer: core::text::Renderer,
 {
     Text::new(text)
 }
 
 /// Creates a new [`Text`] widget that displays the provided value.
-pub fn value<'a, Theme, Renderer>(value: impl ToString) -> Text<'a, Theme, Renderer>
+pub fn value<'a, Theme>(value: impl ToString) -> Text<'a, Theme>
 where
     Theme: text::Catalog + 'a,
-    Renderer: core::text::Renderer,
 {
     Text::new(value.to_string())
 }
@@ -1147,14 +1184,12 @@ where
 ///     .into()
 /// }
 /// ```
-pub fn rich_text<'a, Link, Message, Theme, Renderer>(
-    spans: impl AsRef<[text::Span<'a, Link, Renderer::Font>]> + 'a,
-) -> text::Rich<'a, Link, Message, Theme, Renderer>
+pub fn rich_text<'a, Link, Message, Theme>(
+    spans: impl AsRef<[text::Span<'a, Link>]> + 'a,
+) -> text::Rich<'a, Link, Message, Theme>
 where
     Link: Clone + 'static,
     Theme: text::Catalog + 'a,
-    Renderer: core::text::Renderer,
-    Renderer::Font: 'a,
 {
     text::Rich::with_spans(spans)
 }
@@ -1191,7 +1226,7 @@ where
 ///     .into()
 /// }
 /// ```
-pub fn span<'a, Link, Font>(text: impl text::IntoFragment<'a>) -> text::Span<'a, Link, Font> {
+pub fn span<'a, Link>(text: impl text::IntoFragment<'a>) -> text::Span<'a, Link> {
     text::Span::new(text)
 }
 
@@ -1302,16 +1337,15 @@ where
 ///     column![a, b, c, all].into()
 /// }
 /// ```
-pub fn radio<'a, Message, Theme, Renderer, V>(
+pub fn radio<'a, Message, Theme, V>(
     label: impl Into<String>,
     value: V,
     selected: Option<V>,
     on_click: impl FnOnce(V) -> Message,
-) -> Radio<'a, Message, Theme, Renderer>
+) -> Radio<'a, Message, Theme>
 where
     Message: Clone,
     Theme: radio::Catalog + 'a,
-    Renderer: core::text::Renderer,
     V: Copy + Eq,
 {
     Radio::new(label, value, selected, on_click)
@@ -1351,12 +1385,9 @@ where
 ///     }
 /// }
 /// ```
-pub fn toggler<'a, Message, Theme, Renderer>(
-    is_checked: bool,
-) -> Toggler<'a, Message, Theme, Renderer>
+pub fn toggler<'a, Message, Theme>(is_checked: bool) -> Toggler<'a, Message, Theme>
 where
     Theme: toggler::Catalog + 'a,
-    Renderer: core::text::Renderer,
 {
     Toggler::new(is_checked)
 }
@@ -1395,14 +1426,13 @@ where
 ///     }
 /// }
 /// ```
-pub fn text_input<'a, Message, Theme, Renderer>(
+pub fn text_input<'a, Message, Theme>(
     placeholder: impl text::IntoFragment<'a>,
     value: impl text::IntoFragment<'a>,
-) -> TextInput<'a, Message, Theme, Renderer>
+) -> TextInput<'a, Message, Theme>
 where
     Message: Clone,
     Theme: text_input::Catalog + 'a,
-    Renderer: core::text::Renderer,
 {
     TextInput::new(placeholder, value)
 }
@@ -1444,7 +1474,7 @@ where
 /// ```
 pub fn text_editor<'a, Message, Theme, Renderer>(
     content: &'a text_editor::Content<Renderer>,
-) -> TextEditor<'a, core::text::highlighter::PlainText, Message, Theme, Renderer>
+) -> TextEditor<'a, core::text::parser::PlainText, Message, Theme, Renderer>
 where
     Message: Clone,
     Theme: text_editor::Catalog + 'a,
@@ -1608,18 +1638,17 @@ where
 ///     }
 /// }
 /// ```
-pub fn pick_list<'a, T, L, V, Message, Theme, Renderer>(
+pub fn pick_list<'a, T, L, V, Message, Theme>(
     selected: Option<V>,
     options: L,
     to_string: impl Fn(&T) -> String + 'a,
-) -> PickList<'a, T, L, V, Message, Theme, Renderer>
+) -> PickList<'a, T, L, V, Message, Theme>
 where
     T: PartialEq + Clone + 'a,
     L: Borrow<[T]> + 'a,
     V: Borrow<T> + 'a,
     Message: Clone,
     Theme: pick_list::Catalog + overlay::menu::Catalog,
-    Renderer: core::text::Renderer,
 {
     PickList::new(selected, options, to_string)
 }
@@ -1682,16 +1711,15 @@ where
 ///     }
 /// }
 /// ```
-pub fn combo_box<'a, T, Message, Theme, Renderer>(
+pub fn combo_box<'a, T, Message, Theme>(
     state: &'a combo_box::State<T>,
     placeholder: impl text::IntoFragment<'a>,
     selection: Option<&T>,
     on_selected: impl Fn(T) -> Message + 'a,
-) -> ComboBox<'a, T, Message, Theme, Renderer>
+) -> ComboBox<'a, T, Message, Theme>
 where
     T: std::fmt::Display + Clone,
     Theme: combo_box::Catalog + 'a,
-    Renderer: core::text::Renderer,
 {
     ComboBox::new(state, placeholder, selection, on_selected)
 }
@@ -1804,7 +1832,7 @@ pub fn iced<'a, Message, Theme, Renderer>(
 ) -> Element<'a, Message, Theme, Renderer>
 where
     Message: 'a,
-    Renderer: core::Renderer + core::text::Renderer<Font = core::Font> + 'a,
+    Renderer: core::text::Renderer + 'a,
     Theme: text::Catalog + container::Catalog + 'a,
     <Theme as container::Catalog>::Class<'a>: From<container::StyleFn<'a, Theme>>,
     <Theme as text::Catalog>::Class<'a>: From<text::StyleFn<'a, Theme>>,

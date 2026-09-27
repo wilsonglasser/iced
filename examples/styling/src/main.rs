@@ -1,7 +1,7 @@
 use iced::keyboard;
 use iced::widget::{
-    button, center_x, center_y, checkbox, column, container, pick_list, progress_bar, row, rule,
-    scrollable, slider, space, text, text_input, toggler,
+    button, center, checkbox, column, container, pick_list, progress_bar, row, rule, scrollable,
+    slider, space, text, text_input, toggler,
 };
 use iced::{Center, Element, Fill, Fit, Shrink, Subscription, Theme};
 
@@ -121,7 +121,8 @@ impl Styling {
         let scroll_me = scrollable(column!["Scroll me!", space().height(800), "You did it!"])
             .width(Fill)
             .height(Fill)
-            .auto_scroll(true);
+            .auto_scroll(true)
+            .spacing(10);
 
         let check = checkbox(self.checkbox_value)
             .label("Check me!")
@@ -135,12 +136,11 @@ impl Styling {
 
         let disabled_toggle = toggler(self.toggler_value).label("Disabled");
 
-        let card = {
-            container(column![text("Card Example").size(24), slider(), progress_bar(),].spacing(20))
+        let card =
+            container(column![text("Card Example").size(24), slider(), progress_bar()].spacing(20))
                 .width(Fill)
                 .padding(20)
-                .style(container::bordered_box)
-        };
+                .style(container::bordered_box);
 
         let content = column![
             choose_theme,
@@ -163,7 +163,7 @@ impl Styling {
         .padding(20)
         .width(Fit.max(600));
 
-        center_y(scrollable(center_x(content)).spacing(10))
+        container(scrollable(center(content)).spacing(10))
             .padding(10)
             .into()
     }

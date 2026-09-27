@@ -18,7 +18,7 @@ pub struct Sensor<'a, Key, Message, Theme = crate::Theme, Renderer = crate::Rend
     content: Element<'a, Message, Theme, Renderer>,
     key: Key,
     on_show: Option<Box<dyn Fn(Size) -> Message + 'a>>,
-    on_resize: Option<Box<dyn Fn(Size) -> Message + 'a>>,
+    on_resize: Option<Box<dyn Fn(Size) -> Option<Message> + 'a>>,
     on_hide: Option<Message>,
     anticipate: Pixels,
     delay: Duration,
@@ -58,8 +58,11 @@ where
     /// Sets the message to be produced when the content changes [`Size`] once its in view.
     ///
     /// The closure will receive the new [`Size`] of the content.
-    pub fn on_resize(mut self, on_resize: impl Fn(Size) -> Message + 'a) -> Self {
-        self.on_resize = Some(Box::new(on_resize));
+    pub fn on_resize<T>(mut self, on_resize: impl Fn(Size) -> T + 'a) -> Self
+    where
+        T: Into<Option<Message>>,
+    {
+        self.on_resize = Some(Box::new(move |size| on_resize(size).into()));
         self
     }
 
@@ -165,7 +168,7 @@ where
         &mut self,
         tree: &mut Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
@@ -192,9 +195,11 @@ where
                 if let Some(on_resize) = &self.on_resize {
                     let size = bounds.size();
 
-                    if Some(size) != state.last_size {
+                    if Some(size) != state.last_size
+                        && let Some(message) = on_resize(size)
+                    {
                         state.last_size = Some(size);
-                        shell.publish(on_resize(size));
+                        shell.publish(message);
                     }
                 }
             } else if state.has_popped_in {
@@ -202,9 +207,11 @@ where
                     if let Some(on_resize) = &self.on_resize {
                         let size = bounds.size();
 
-                        if Some(size) != state.last_size {
+                        if Some(size) != state.last_size
+                            && let Some(message) = on_resize(size)
+                        {
                             state.last_size = Some(size);
-                            shell.publish(on_resize(size));
+                            shell.publish(message);
                         }
                     }
                 } else if self.on_hide.is_some() {
@@ -253,15 +260,12 @@ where
         self.content.as_widget().size()
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
         self.content
             .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
+            .layout(&mut tree.children[0], renderer, limits);
+
+        tree.size = tree.children[0].size;
     }
 
     fn draw(
@@ -270,7 +274,7 @@ where
         renderer: &mut Renderer,
         theme: &Theme,
         style: &renderer::Style,
-        layout: layout::Layout<'_>,
+        layout: layout::Layout,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
@@ -288,19 +292,24 @@ where
     fn operate(
         &mut self,
         tree: &mut Tree,
-        layout: core::Layout<'_>,
+        layout: core::Layout,
+        viewport: &Rectangle,
         renderer: &Renderer,
         operation: &mut dyn widget::Operation,
     ) {
-        self.content
-            .as_widget_mut()
-            .operate(&mut tree.children[0], layout, renderer, operation);
+        self.content.as_widget_mut().operate(
+            &mut tree.children[0],
+            layout,
+            viewport,
+            renderer,
+            operation,
+        );
     }
 
     fn mouse_interaction(
         &self,
         tree: &Tree,
-        layout: core::Layout<'_>,
+        layout: core::Layout,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
         renderer: &Renderer,
@@ -317,17 +326,19 @@ where
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: core::Layout<'b>,
+        layout: core::Layout,
         renderer: &Renderer,
         viewport: &Rectangle,
         translation: core::Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        window: Size,
+    ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
         self.content.as_widget_mut().overlay(
             &mut tree.children[0],
             layout,
             renderer,
             viewport,
             translation,
+            window,
         )
     }
 }

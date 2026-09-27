@@ -13,6 +13,8 @@ use crate::test::Selector;
 use crate::test::instruction::{Interaction, Mouse, Target};
 use crate::test::selector;
 
+use std::cell::Cell;
+
 pub fn recorder<'a, Message, Theme, Renderer>(
     content: impl Into<Element<'a, Message, Theme, Renderer>>,
 ) -> Recorder<'a, Message, Theme, Renderer> {
@@ -41,8 +43,8 @@ impl<'a, Message, Theme, Renderer> Recorder<'a, Message, Theme, Renderer> {
 }
 
 struct State {
-    last_hovered: Option<Rectangle>,
-    last_hovered_overlay: Option<Rectangle>,
+    last_hovered: Cell<Option<Rectangle>>,
+    last_hovered_overlay: Cell<Option<Rectangle>>,
 }
 
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -57,8 +59,8 @@ where
 
     fn state(&self) -> tree::State {
         tree::State::new(State {
-            last_hovered: None,
-            last_hovered_overlay: None,
+            last_hovered: Cell::new(None),
+            last_hovered_overlay: Cell::new(None),
         })
     }
 
@@ -74,7 +76,7 @@ where
         &mut self,
         tree: &mut widget::Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
@@ -87,19 +89,20 @@ where
         if !self.has_overlay
             && let Some(on_record) = &self.on_record
         {
-            let state = tree.state.downcast_mut::<State>();
+            let state = tree.state.downcast_ref::<State>();
 
             record(
                 event,
                 cursor,
                 shell,
                 layout.bounds(),
-                &mut state.last_hovered,
+                &state.last_hovered,
                 on_record,
                 |operation| {
                     self.content.as_widget_mut().operate(
                         &mut tree.children[0],
                         layout,
+                        viewport,
                         renderer,
                         operation,
                     );
@@ -118,15 +121,12 @@ where
         );
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut widget::Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
+    fn layout(&mut self, tree: &mut widget::Tree, renderer: &Renderer, limits: &layout::Limits) {
         self.content
             .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
+            .layout(&mut tree.children[0], renderer, limits);
+
+        tree.size = tree.children[0].size;
     }
 
     fn draw(
@@ -135,7 +135,7 @@ where
         renderer: &mut Renderer,
         theme: &Theme,
         style: &renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
@@ -151,14 +151,14 @@ where
 
         let state = tree.state.downcast_ref::<State>();
 
-        let Some(last_hovered) = &state.last_hovered else {
+        let Some(last_hovered) = state.last_hovered.get() else {
             return;
         };
 
         renderer.with_layer(*viewport, |renderer| {
             renderer.fill_quad(
                 renderer::Quad {
-                    bounds: *last_hovered,
+                    bounds: last_hovered,
                     ..renderer::Quad::default()
                 },
                 highlight(theme).scale_alpha(0.7),
@@ -169,7 +169,7 @@ where
     fn mouse_interaction(
         &self,
         tree: &widget::Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
         renderer: &Renderer,
@@ -186,23 +186,29 @@ where
     fn operate(
         &mut self,
         tree: &mut widget::Tree,
-        layout: Layout<'_>,
+        layout: Layout,
+        viewport: &Rectangle,
         renderer: &Renderer,
         operation: &mut dyn widget::Operation,
     ) {
-        self.content
-            .as_widget_mut()
-            .operate(&mut tree.children[0], layout, renderer, operation);
+        self.content.as_widget_mut().operate(
+            &mut tree.children[0],
+            layout,
+            viewport,
+            renderer,
+            operation,
+        );
     }
 
     fn overlay<'a>(
         &'a mut self,
         tree: &'a mut widget::Tree,
-        layout: Layout<'a>,
+        layout: Layout,
         renderer: &Renderer,
         _viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'a, Message, Theme, Renderer>> {
+        window: Size,
+    ) -> Vec<overlay::Element<'a, Message, Theme, Renderer>> {
         self.has_overlay = false;
 
         self.content
@@ -213,19 +219,21 @@ where
                 renderer,
                 &layout.bounds(),
                 translation,
+                window,
             )
+            .into_iter()
             .map(|raw| {
+                let state = tree.state.downcast_ref::<State>();
                 self.has_overlay = true;
-
-                let state = tree.state.downcast_mut::<State>();
 
                 overlay::Element::new(Box::new(Overlay {
                     raw,
                     bounds: layout.bounds(),
-                    last_hovered: &mut state.last_hovered_overlay,
+                    last_hovered: &state.last_hovered_overlay,
                     on_record: self.on_record.as_deref(),
                 }))
             })
+            .collect()
     }
 }
 
@@ -244,7 +252,7 @@ where
 struct Overlay<'a, Message, Theme, Renderer> {
     raw: overlay::Element<'a, Message, Theme, Renderer>,
     bounds: Rectangle,
-    last_hovered: &'a mut Option<Rectangle>,
+    last_hovered: &'a Cell<Option<Rectangle>>,
     on_record: Option<&'a dyn Fn(Interaction) -> Message>,
 }
 
@@ -254,30 +262,23 @@ where
     Renderer: core::Renderer + 'a,
     Theme: theme::Base + 'a,
 {
-    fn layout(&mut self, renderer: &Renderer, bounds: Size) -> layout::Node {
-        self.raw.as_overlay_mut().layout(renderer, bounds)
-    }
-
     fn draw(
         &self,
         renderer: &mut Renderer,
         theme: &Theme,
         style: &renderer::Style,
-        layout: Layout<'_>,
         cursor: mouse::Cursor,
     ) {
-        self.raw
-            .as_overlay()
-            .draw(renderer, theme, style, layout, cursor);
+        self.raw.as_overlay().draw(renderer, theme, style, cursor);
 
-        let Some(last_hovered) = &self.last_hovered else {
+        let Some(last_hovered) = self.last_hovered.get() else {
             return;
         };
 
         renderer.with_layer(self.bounds, |renderer| {
             renderer.fill_quad(
                 renderer::Quad {
-                    bounds: *last_hovered,
+                    bounds: last_hovered,
                     ..renderer::Quad::default()
                 },
                 highlight(theme).scale_alpha(0.7),
@@ -285,21 +286,13 @@ where
         });
     }
 
-    fn operate(
-        &mut self,
-        layout: Layout<'_>,
-        renderer: &Renderer,
-        operation: &mut dyn widget::Operation,
-    ) {
-        self.raw
-            .as_overlay_mut()
-            .operate(layout, renderer, operation);
+    fn operate(&mut self, renderer: &Renderer, operation: &mut dyn widget::Operation) {
+        self.raw.as_overlay_mut().operate(renderer, operation);
     }
 
     fn update(
         &mut self,
         event: &Event,
-        layout: Layout<'_>,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
@@ -317,45 +310,43 @@ where
                 self.last_hovered,
                 on_event,
                 |operation| {
-                    self.raw
-                        .as_overlay_mut()
-                        .operate(layout, renderer, operation);
+                    self.raw.as_overlay_mut().operate(renderer, operation);
                 },
             );
         }
 
         self.raw
             .as_overlay_mut()
-            .update(event, layout, cursor, renderer, shell);
+            .update(event, cursor, renderer, shell);
     }
 
-    fn mouse_interaction(
-        &self,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
-        self.raw
-            .as_overlay()
-            .mouse_interaction(layout, cursor, renderer)
+    fn mouse_interaction(&self, cursor: mouse::Cursor, renderer: &Renderer) -> mouse::Interaction {
+        self.raw.as_overlay().mouse_interaction(cursor, renderer)
     }
 
     fn overlay<'b>(
         &'b mut self,
-        layout: Layout<'b>,
         renderer: &Renderer,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
-        self.raw
-            .as_overlay_mut()
-            .overlay(layout, renderer)
+    ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
+        let Self {
+            raw,
+            bounds,
+            last_hovered,
+            on_record,
+        } = self;
+
+        raw.as_overlay_mut()
+            .overlay(renderer)
+            .into_iter()
             .map(|raw| {
                 overlay::Element::new(Box::new(Overlay {
                     raw,
-                    bounds: self.bounds,
-                    last_hovered: self.last_hovered,
-                    on_record: self.on_record,
+                    bounds: *bounds,
+                    last_hovered,
+                    on_record: *on_record,
                 }))
             })
+            .collect()
     }
 
     fn index(&self) -> f32 {
@@ -368,7 +359,7 @@ fn record<Message>(
     cursor: mouse::Cursor,
     shell: &mut Shell<'_, Message>,
     bounds: Rectangle,
-    last_hovered: &mut Option<Rectangle>,
+    last_hovered: &Cell<Option<Rectangle>>,
     on_record: impl Fn(Interaction) -> Message,
     operate: impl FnMut(&mut dyn widget::Operation),
 ) {
@@ -419,9 +410,9 @@ fn record<Message>(
         find_text(position + (bounds.position() - Point::ORIGIN), operate)
     {
         *target = Target::Text(content);
-        *last_hovered = visible_bounds;
+        last_hovered.set(visible_bounds);
     } else {
-        *last_hovered = None;
+        last_hovered.set(None);
     }
 
     shell.publish(on_record(interaction));

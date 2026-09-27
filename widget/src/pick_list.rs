@@ -75,8 +75,8 @@ use crate::core::widget::tree::{self, Tree};
 use crate::core::widget::Id;
 use crate::core::window;
 use crate::core::{
-    Background, Border, Color, Element, Event, Layout, Length, Padding, Pixels, Point, Rectangle,
-    Shell, Size, Theme, Vector, Widget,
+    Background, Border, Color, Element, Event, Font, Layout, Length, Padding, Pixels, Point,
+    Rectangle, Shell, Size, Theme, Vector, Widget,
 };
 use crate::overlay::menu::{self, Menu};
 
@@ -146,13 +146,12 @@ use std::f32;
 ///     }
 /// }
 /// ```
-pub struct PickList<'a, T, L, V, Message, Theme = crate::Theme, Renderer = crate::Renderer>
+pub struct PickList<'a, T, L, V, Message, Theme = crate::Theme>
 where
     T: PartialEq + Clone,
     L: Borrow<[T]> + 'a,
     V: Borrow<T> + 'a,
     Theme: Catalog,
-    Renderer: text::Renderer,
 {
     id: Option<Id>,
     options: L,
@@ -165,25 +164,24 @@ where
     width: Length,
     padding: Padding,
     text_size: Option<Pixels>,
-    line_height: text::LineHeight,
+    line_height: Option<text::LineHeight>,
     shaping: text::Shaping,
     ellipsis: text::Ellipsis,
-    font: Option<Renderer::Font>,
-    handle: Handle<Renderer::Font>,
+    font: Option<Font>,
+    handle: Handle,
     class: <Theme as Catalog>::Class<'a>,
     menu_class: <Theme as menu::Catalog>::Class<'a>,
     last_status: Option<Status>,
     menu_height: Length,
 }
 
-impl<'a, T, L, V, Message, Theme, Renderer> PickList<'a, T, L, V, Message, Theme, Renderer>
+impl<'a, T, L, V, Message, Theme> PickList<'a, T, L, V, Message, Theme>
 where
     T: PartialEq + Clone,
     L: Borrow<[T]> + 'a,
     V: Borrow<T> + 'a,
     Message: Clone,
     Theme: Catalog,
-    Renderer: text::Renderer,
 {
     /// Creates a new [`PickList`] with the given list of options, the current
     /// selected value, and the message to produce when an option is selected.
@@ -200,7 +198,7 @@ where
             width: Length::Shrink,
             padding: crate::button::DEFAULT_PADDING,
             text_size: None,
-            line_height: text::LineHeight::default(),
+            line_height: None,
             shaping: text::Shaping::default(),
             ellipsis: text::Ellipsis::End,
             font: None,
@@ -255,7 +253,7 @@ where
 
     /// Sets the text [`text::LineHeight`] of the [`PickList`].
     pub fn line_height(mut self, line_height: impl Into<text::LineHeight>) -> Self {
-        self.line_height = line_height.into();
+        self.line_height = Some(line_height.into());
         self
     }
 
@@ -272,13 +270,13 @@ where
     }
 
     /// Sets the font of the [`PickList`].
-    pub fn font(mut self, font: impl Into<Renderer::Font>) -> Self {
+    pub fn font(mut self, font: impl Into<Font>) -> Self {
         self.font = Some(font.into());
         self
     }
 
     /// Sets the [`Handle`] of the [`PickList`].
-    pub fn handle(mut self, handle: Handle<Renderer::Font>) -> Self {
+    pub fn handle(mut self, handle: Handle) -> Self {
         self.handle = handle;
         self
     }
@@ -339,7 +337,7 @@ where
 }
 
 impl<'a, T, L, V, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for PickList<'a, T, L, V, Message, Theme, Renderer>
+    for PickList<'a, T, L, V, Message, Theme>
 where
     T: Clone + PartialEq + 'a,
     L: Borrow<[T]>,
@@ -363,26 +361,22 @@ where
         }
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
         let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
 
-        let font = self.font.unwrap_or_else(|| renderer.default_font());
-        let text_size = self.text_size.unwrap_or_else(|| renderer.default_size());
+        let font = self.font.unwrap_or_else(|| renderer.font());
+        let text_size = self.text_size.unwrap_or_else(|| renderer.text_size());
+        let line_height = self.line_height.unwrap_or_else(|| renderer.line_height());
         let options = self.options.borrow();
 
         let option_text = Text {
             content: "",
             bounds: Size::new(
-                limits.max().width,
-                self.line_height.to_absolute(text_size).into(),
+                limits.bounds().width,
+                line_height.to_absolute(text_size).into(),
             ),
             size: text_size,
-            line_height: self.line_height,
+            line_height,
             font,
             align_x: text::Alignment::Default,
             align_y: alignment::Vertical::Center,
@@ -429,7 +423,7 @@ where
         let size = {
             let intrinsic = Size::new(
                 max_width + text_size.0 + self.padding.left,
-                f32::from(self.line_height.to_absolute(text_size)),
+                f32::from(line_height.to_absolute(text_size)),
             );
 
             limits
@@ -439,26 +433,14 @@ where
                 .expand(self.padding)
         };
 
-        layout::Node::new(size)
-    }
-
-    fn operate(
-        &mut self,
-        tree: &mut Tree,
-        layout: Layout<'_>,
-        _renderer: &Renderer,
-        operation: &mut dyn Operation,
-    ) {
-        let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
-
-        operation.focusable(self.id.as_ref(), layout.bounds(), state);
+        tree.size = size;
     }
 
     fn update(
         &mut self,
         tree: &mut Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
@@ -700,7 +682,7 @@ where
     fn mouse_interaction(
         &self,
         _tree: &Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
         _renderer: &Renderer,
@@ -725,11 +707,11 @@ where
         renderer: &mut Renderer,
         theme: &Theme,
         _style: &renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        let font = self.font.unwrap_or_else(|| renderer.default_font());
+        let font = self.font.unwrap_or_else(|| renderer.font());
         let selected = self.selected.as_ref().map(Borrow::borrow);
         let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
 
@@ -755,7 +737,7 @@ where
                 Renderer::ICON_FONT,
                 Renderer::ARROW_DOWN_ICON,
                 *size,
-                text::LineHeight::default(),
+                None,
                 text::Shaping::Basic,
             )),
             Handle::Static(Icon {
@@ -788,7 +770,8 @@ where
         };
 
         if let Some((font, code_point, size, line_height, shaping)) = handle {
-            let size = size.unwrap_or_else(|| renderer.default_size());
+            let size = size.unwrap_or_else(|| renderer.text_size());
+            let line_height = line_height.unwrap_or_else(|| renderer.line_height());
 
             renderer.fill_text(
                 Text {
@@ -816,17 +799,18 @@ where
         let label = selected.map(&self.to_string);
 
         if let Some(label) = label.or_else(|| self.placeholder.clone()) {
-            let text_size = self.text_size.unwrap_or_else(|| renderer.default_size());
+            let text_size = self.text_size.unwrap_or_else(|| renderer.text_size());
+            let line_height = self.line_height.unwrap_or_else(|| renderer.line_height());
 
             renderer.fill_text(
                 Text {
                     content: label,
                     size: text_size,
-                    line_height: self.line_height,
+                    line_height,
                     font,
                     bounds: Size::new(
                         bounds.width - self.padding.x(),
-                        f32::from(self.line_height.to_absolute(text_size)),
+                        f32::from(line_height.to_absolute(text_size)),
                     ),
                     align_x: text::Alignment::Default,
                     align_y: alignment::Vertical::Center,
@@ -846,23 +830,45 @@ where
         }
     }
 
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout,
+        _viewport: &Rectangle,
+        _renderer: &Renderer,
+        operation: &mut dyn Operation,
+    ) {
+        let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
+
+        operation.focusable(self.id.as_ref(), layout.bounds(), state);
+
+        let selected = self.selected.as_ref().map(Borrow::borrow);
+        let label = selected.map(&self.to_string);
+
+        if let Some(label) = label.or_else(|| self.placeholder.clone()) {
+            operation.text(None, layout.bounds(), &label);
+        }
+    }
+
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         renderer: &Renderer,
-        viewport: &Rectangle,
+        _viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        window: Size,
+    ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
         let Some(on_select) = &self.on_select else {
-            return None;
+            return Vec::new();
         };
 
         let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
-        let font = self.font.unwrap_or_else(|| renderer.default_font());
+        let font = self.font.unwrap_or_else(|| renderer.font());
 
         if state.is_open {
             let bounds = layout.bounds();
+            let position = layout.position() + translation;
 
             let mut menu = Menu::new(
                 &mut state.menu,
@@ -878,6 +884,7 @@ where
                 &self.menu_class,
             )
             .width(bounds.width)
+            .height(self.menu_height)
             .padding(self.padding)
             .font(font)
             .ellipsis(self.ellipsis)
@@ -887,19 +894,14 @@ where
                 menu = menu.text_size(text_size);
             }
 
-            Some(menu.overlay(
-                layout.position() + translation,
-                *viewport,
-                bounds.height,
-                self.menu_height,
-            ))
+            vec![menu.overlay(renderer, position, window, bounds.height)]
         } else {
-            None
+            Vec::new()
         }
     }
 }
 
-impl<'a, T, L, V, Message, Theme, Renderer> From<PickList<'a, T, L, V, Message, Theme, Renderer>>
+impl<'a, T, L, V, Message, Theme, Renderer> From<PickList<'a, T, L, V, Message, Theme>>
     for Element<'a, Message, Theme, Renderer>
 where
     T: Clone + PartialEq + 'a,
@@ -909,7 +911,7 @@ where
     Theme: Catalog + 'a,
     Renderer: text::Renderer + 'a,
 {
-    fn from(pick_list: PickList<'a, T, L, V, Message, Theme, Renderer>) -> Self {
+    fn from(pick_list: PickList<'a, T, L, V, Message, Theme>) -> Self {
         Self::new(pick_list)
     }
 }
@@ -966,7 +968,7 @@ impl<P: text::Paragraph> operation::Focusable for State<P> {
 
 /// The handle to the right side of the [`PickList`].
 #[derive(Debug, Clone, PartialEq)]
-pub enum Handle<Font> {
+pub enum Handle {
     /// Displays an arrow icon (▼).
     ///
     /// This is the default.
@@ -975,19 +977,19 @@ pub enum Handle<Font> {
         size: Option<Pixels>,
     },
     /// A custom static handle.
-    Static(Icon<Font>),
+    Static(Icon),
     /// A custom dynamic handle.
     Dynamic {
         /// The [`Icon`] used when [`PickList`] is closed.
-        closed: Icon<Font>,
+        closed: Icon,
         /// The [`Icon`] used when [`PickList`] is open.
-        open: Icon<Font>,
+        open: Icon,
     },
     /// No handle will be shown.
     None,
 }
 
-impl<Font> Default for Handle<Font> {
+impl Default for Handle {
     fn default() -> Self {
         Self::Arrow { size: None }
     }
@@ -995,7 +997,7 @@ impl<Font> Default for Handle<Font> {
 
 /// The icon of a [`Handle`].
 #[derive(Debug, Clone, PartialEq)]
-pub struct Icon<Font> {
+pub struct Icon {
     /// Font that will be used to display the `code_point`,
     pub font: Font,
     /// The unicode code point that will be used as the icon.
@@ -1003,7 +1005,7 @@ pub struct Icon<Font> {
     /// Font size of the content.
     pub size: Option<Pixels>,
     /// Line height of the content.
-    pub line_height: text::LineHeight,
+    pub line_height: Option<text::LineHeight>,
     /// The shaping strategy of the icon.
     pub shaping: text::Shaping,
 }

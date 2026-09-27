@@ -34,18 +34,18 @@
 use crate::core::alignment;
 use crate::core::clipboard;
 use crate::core::layout::{self, Layout};
-use crate::core::length;
 use crate::core::mouse;
 use crate::core::renderer;
 use crate::core::text::editor::{self, Editor as _};
-use crate::core::text::highlighter::{self, Highlighter};
+use crate::core::text::highlighter;
+use crate::core::text::parser;
 use crate::core::text::{self, LineHeight, Text, Wrapping};
 use crate::core::theme;
 use crate::core::widget::{self, Widget};
 use crate::core::window;
 use crate::core::{
-    Background, Border, Color, Element, Event, Length, Padding, Pixels, Rectangle, Shell, Size,
-    Theme,
+    Background, Border, Color, Element, Event, Font, Length, Padding, Pixels, Rectangle, Shell,
+    Size, Theme,
 };
 
 use std::borrow::Cow;
@@ -53,6 +53,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::ops::DerefMut;
 
+pub use text::Highlighter;
 pub use text::editor::{
     Action, Binding, Cursor, Edit, KeyPress, Line, LineEnding, Motion, Selection,
 };
@@ -90,18 +91,18 @@ pub use text::editor::{
 ///     }
 /// }
 /// ```
-pub struct TextEditor<'a, Highlighter, Message, Theme = crate::Theme, Renderer = crate::Renderer>
+pub struct TextEditor<'a, Parser, Message, Theme = crate::Theme, Renderer = crate::Renderer>
 where
-    Highlighter: text::Highlighter,
+    Parser: text::Parser,
     Theme: Catalog,
     Renderer: text::Renderer,
 {
     id: Option<widget::Id>,
     content: &'a Content<Renderer>,
     placeholder: Option<text::Fragment<'a>>,
-    font: Option<Renderer::Font>,
+    font: Option<Font>,
     text_size: Option<Pixels>,
-    line_height: LineHeight,
+    line_height: Option<LineHeight>,
     width: Length,
     height: Length,
     padding: Padding,
@@ -109,12 +110,12 @@ where
     class: Theme::Class<'a>,
     key_binding: Option<Box<dyn Fn(KeyPress) -> Option<Binding<Message>> + 'a>>,
     on_edit: Option<Box<dyn Fn(Action) -> Message + 'a>>,
-    highlighter_settings: Highlighter::Settings,
-    highlighter_format: fn(&Highlighter::Highlight, &Theme) -> highlighter::Format<Renderer::Font>,
+    parser_settings: Parser::Settings,
+    highlighter: Option<Box<dyn text::Highlighter<Parser::Output, Theme> + 'a>>,
     last_status: Option<Status>,
 }
 
-impl<'a, Message, Theme, Renderer> TextEditor<'a, highlighter::PlainText, Message, Theme, Renderer>
+impl<'a, Message, Theme, Renderer> TextEditor<'a, parser::PlainText, Message, Theme, Renderer>
 where
     Theme: Catalog,
     Renderer: text::Renderer,
@@ -127,7 +128,7 @@ where
             placeholder: None,
             font: None,
             text_size: None,
-            line_height: LineHeight::default(),
+            line_height: None,
             width: Length::Fill,
             height: Length::Fit,
             padding: Padding::new(5.0),
@@ -135,17 +136,58 @@ where
             class: <Theme as Catalog>::default(),
             key_binding: None,
             on_edit: None,
-            highlighter_settings: (),
-            highlighter_format: |_highlight, _theme| highlighter::Format::default(),
+            parser_settings: (),
+            highlighter: None,
             last_status: None,
         }
     }
 }
 
-impl<'a, Highlighter, Message, Theme, Renderer>
-    TextEditor<'a, Highlighter, Message, Theme, Renderer>
+impl<'a, Message, Renderer> TextEditor<'a, parser::PlainText, Message, crate::Theme, Renderer>
 where
-    Highlighter: text::Highlighter,
+    Renderer: text::Renderer,
+{
+    /// Highlights the [`TextEditor`] using the given syntax.
+    ///
+    /// ```no_run
+    /// # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::Renderer; pub use iced_widget::core::*; }
+    /// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
+    /// #
+    /// use iced::color;
+    /// use iced::widget::text;
+    /// use iced::widget::text_editor;
+    /// use iced::Theme;
+    ///
+    /// struct State {
+    ///    content: text_editor::Content,
+    /// }
+    ///
+    /// fn view(state: &State) -> Element<'_, ()> {
+    ///     text_editor(&state.content)
+    ///         .highlight("rust")
+    ///         .into()
+    /// }
+    /// ```
+    #[cfg(feature = "highlighter")]
+    pub fn highlight(
+        self,
+        syntax: &str,
+    ) -> TextEditor<'a, iced_highlighter::Parser, Message, crate::Theme, Renderer>
+    where
+        Renderer: text::Renderer,
+    {
+        self.highlight_with(
+            iced_highlighter::Settings {
+                token: syntax.to_owned(),
+            },
+            crate::core::Code::highlight,
+        )
+    }
+}
+
+impl<'a, Parser, Message, Theme, Renderer> TextEditor<'a, Parser, Message, Theme, Renderer>
+where
+    Parser: text::Parser,
     Theme: Catalog,
     Renderer: text::Renderer,
 {
@@ -184,8 +226,8 @@ where
 
     /// Sets the [`Font`] of the [`TextEditor`].
     ///
-    /// [`Font`]: text::Renderer::Font
-    pub fn font(mut self, font: impl Into<Renderer::Font>) -> Self {
+    /// [`Font`]: crate::core::Font
+    pub fn font(mut self, font: impl Into<Font>) -> Self {
         self.font = Some(font.into());
         self
     }
@@ -198,7 +240,7 @@ where
 
     /// Sets the [`text::LineHeight`] of the [`TextEditor`].
     pub fn line_height(mut self, line_height: impl Into<text::LineHeight>) -> Self {
-        self.line_height = line_height.into();
+        self.line_height = Some(line_height.into());
         self
     }
 
@@ -214,32 +256,13 @@ where
         self
     }
 
-    /// Highlights the [`TextEditor`] using the given syntax and theme.
-    #[cfg(feature = "highlighter")]
-    pub fn highlight(
+    /// Highlights the [`TextEditor`] with the given [`text::Parser`] and
+    /// [`text::Highlighter`].
+    pub fn highlight_with<P: text::Parser>(
         self,
-        syntax: &str,
-        theme: iced_highlighter::Theme,
-    ) -> TextEditor<'a, iced_highlighter::Highlighter, Message, Theme, Renderer>
-    where
-        Renderer: text::Renderer<Font = crate::core::Font>,
-    {
-        self.highlight_with::<iced_highlighter::Highlighter>(
-            iced_highlighter::Settings {
-                theme,
-                token: syntax.to_owned(),
-            },
-            |highlight, _theme| highlight.to_format(),
-        )
-    }
-
-    /// Highlights the [`TextEditor`] with the given [`Highlighter`] and
-    /// a strategy to turn its highlights into some text format.
-    pub fn highlight_with<H: text::Highlighter>(
-        self,
-        settings: H::Settings,
-        to_format: fn(&H::Highlight, &Theme) -> highlighter::Format<Renderer::Font>,
-    ) -> TextEditor<'a, H, Message, Theme, Renderer> {
+        settings: P::Settings,
+        highlighter: impl text::Highlighter<P::Output, Theme> + 'a,
+    ) -> TextEditor<'a, P, Message, Theme, Renderer> {
         TextEditor {
             id: self.id,
             content: self.content,
@@ -254,8 +277,8 @@ where
             class: self.class,
             key_binding: self.key_binding,
             on_edit: self.on_edit,
-            highlighter_settings: settings,
-            highlighter_format: to_format,
+            parser_settings: settings,
+            highlighter: Some(Box::new(highlighter)),
             last_status: self.last_status,
         }
     }
@@ -290,40 +313,38 @@ where
     }
 }
 
-struct State<H: Highlighter> {
+struct State<Parser: text::Parser> {
     editor: editor::State,
-    highlighter: RefCell<H>,
-    highlighter_settings: H::Settings,
-    highlighter_format_address: usize,
+    parser: RefCell<Parser>,
+    parser_settings: Parser::Settings,
     last_theme: RefCell<Option<String>>,
     last_id: Option<widget::Id>,
 }
 
-impl<Highlighter, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for TextEditor<'_, Highlighter, Message, Theme, Renderer>
+impl<Parser, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
+    for TextEditor<'_, Parser, Message, Theme, Renderer>
 where
-    Highlighter: text::Highlighter,
+    Parser: text::Parser,
     Theme: Catalog,
     Renderer: text::Renderer,
 {
     fn tag(&self) -> widget::tree::Tag {
-        widget::tree::Tag::of::<State<Highlighter>>()
+        widget::tree::Tag::of::<State<Parser>>()
     }
 
     fn state(&self) -> widget::tree::State {
         widget::tree::State::new(State {
             editor: editor::State::new(),
-            highlighter: RefCell::new(Highlighter::new(&self.highlighter_settings)),
-            highlighter_settings: self.highlighter_settings.clone(),
-            highlighter_format_address: self.highlighter_format as usize,
+            parser: RefCell::new(Parser::new(&self.parser_settings)),
+            parser_settings: self.parser_settings.clone(),
             last_theme: RefCell::new(None),
             last_id: self.id.clone(),
         })
     }
 
     fn diff(&mut self, tree: &mut widget::Tree) {
-        if tree.state.downcast_mut::<State<Highlighter>>().last_id != self.id {
-            tree.state = self.state();
+        if tree.state.downcast_mut::<State<Parser>>().last_id != self.id {
+            tree.state = <Self as Widget<Message, Theme, Renderer>>::state(self);
         }
     }
 
@@ -334,71 +355,42 @@ where
         }
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut widget::Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> iced_renderer::core::layout::Node {
+    fn layout(&mut self, tree: &mut widget::Tree, renderer: &Renderer, limits: &layout::Limits) {
         let mut internal = self.content.0.borrow_mut();
-        let state = tree.state.downcast_mut::<State<Highlighter>>();
+        let state = tree.state.downcast_mut::<State<Parser>>();
 
-        if state.highlighter_format_address != self.highlighter_format as usize {
-            state.highlighter.borrow_mut().change_line(0);
-            state.highlighter_format_address = self.highlighter_format as usize;
+        if state.parser_settings != self.parser_settings {
+            state.parser.borrow_mut().update(&self.parser_settings);
+
+            state.parser_settings = self.parser_settings.clone();
         }
 
-        if state.highlighter_settings != self.highlighter_settings {
-            state
-                .highlighter
-                .borrow_mut()
-                .update(&self.highlighter_settings);
-
-            state.highlighter_settings = self.highlighter_settings.clone();
-        }
-
-        let limits = limits.width(self.width).height(self.height);
+        let limits = limits
+            .width(self.width)
+            .height(self.height)
+            .shrink(self.padding);
 
         internal.editor.update(
-            limits.shrink(self.padding).max(),
-            self.font.unwrap_or_else(|| renderer.default_font()),
-            self.text_size.unwrap_or_else(|| renderer.default_size()),
-            self.line_height,
+            limits.bounds(),
+            self.font.unwrap_or_else(|| renderer.font()),
+            self.text_size.unwrap_or_else(|| renderer.text_size()),
+            self.line_height.unwrap_or_else(|| renderer.line_height()),
             self.wrapping,
             text::Alignment::Default,
             renderer.hint_factor(),
-            state.highlighter.borrow_mut().deref_mut(),
+            state.parser.borrow_mut().deref_mut(),
         );
 
-        match self.height {
-            Length::Shrink
-            | Length::Fit
-            | Length::Bounded {
-                sizing: length::Sizing::Fit | length::Sizing::Shrink,
-                ..
-            } => {
-                let min_bounds = internal.editor.min_bounds();
+        let bounds = limits.resolve(self.width, self.height, internal.editor.min_bounds());
 
-                layout::Node::new(
-                    limits
-                        .height(min_bounds.height)
-                        .max()
-                        .expand(Size::new(0.0, self.padding.y())),
-                )
-            }
-            Length::Fill
-            | Length::FillPortion(_)
-            | Length::Fixed(_)
-            | Length::Bounded { .. }
-            | Length::Fluid(_) => layout::Node::new(limits.max()),
-        }
+        tree.size = bounds.expand(self.padding);
     }
 
     fn update(
         &mut self,
         tree: &mut widget::Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
@@ -408,7 +400,7 @@ where
             return;
         };
 
-        let state = tree.state.downcast_mut::<State<Highlighter>>();
+        let state = tree.state.downcast_mut::<State<Parser>>();
         let is_redraw = matches!(event, Event::Window(window::Event::RedrawRequested(_now)),);
 
         let editor = &self.content.0.borrow().editor;
@@ -496,16 +488,16 @@ where
         renderer: &mut Renderer,
         theme: &Theme,
         _defaults: &renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
         let bounds = layout.bounds();
 
         let mut internal = self.content.0.borrow_mut();
-        let state = tree.state.downcast_ref::<State<Highlighter>>();
+        let state = tree.state.downcast_ref::<State<Parser>>();
 
-        let font = self.font.unwrap_or_else(|| renderer.default_font());
+        let font = self.font.unwrap_or_else(|| renderer.font());
 
         let theme_name = theme.name();
 
@@ -515,15 +507,19 @@ where
             .as_ref()
             .is_none_or(|last_theme| last_theme != theme_name)
         {
-            state.highlighter.borrow_mut().change_line(0);
+            state.parser.borrow_mut().change_line(0);
             let _ = state.last_theme.borrow_mut().replace(theme_name.to_owned());
         }
 
-        internal.editor.highlight(
-            font,
-            state.highlighter.borrow_mut().deref_mut(),
-            |highlight| (self.highlighter_format)(highlight, theme),
-        );
+        internal
+            .editor
+            .highlight(font, state.parser.borrow_mut().deref_mut(), |output| {
+                let Some(highlighter) = &self.highlighter else {
+                    return highlighter::Style::default();
+                };
+
+                highlighter.highlight(output, theme)
+            });
 
         let style = theme.style(&self.class, self.last_status.unwrap_or(Status::Active));
 
@@ -545,8 +541,8 @@ where
                 Text {
                     content: placeholder.clone().into_owned(),
                     bounds: text_bounds.size(),
-                    size: self.text_size.unwrap_or_else(|| renderer.default_size()),
-                    line_height: self.line_height,
+                    size: self.text_size.unwrap_or_else(|| renderer.text_size()),
+                    line_height: self.line_height.unwrap_or_else(|| renderer.line_height()),
                     font,
                     align_x: text::Alignment::Default,
                     align_y: alignment::Vertical::Top,
@@ -576,7 +572,7 @@ where
     fn mouse_interaction(
         &self,
         _tree: &widget::Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
         _renderer: &Renderer,
@@ -597,11 +593,12 @@ where
     fn operate(
         &mut self,
         tree: &mut widget::Tree,
-        layout: Layout<'_>,
+        layout: Layout,
+        _viewport: &Rectangle,
         _renderer: &Renderer,
         operation: &mut dyn widget::Operation,
     ) {
-        let state = tree.state.downcast_mut::<State<Highlighter>>();
+        let state = tree.state.downcast_mut::<State<Parser>>();
 
         operation.focusable(self.id.as_ref(), layout.bounds(), &mut state.editor);
         operation.text_input(
@@ -612,16 +609,15 @@ where
     }
 }
 
-impl<'a, Highlighter, Message, Theme, Renderer>
-    From<TextEditor<'a, Highlighter, Message, Theme, Renderer>>
+impl<'a, Parser, Message, Theme, Renderer> From<TextEditor<'a, Parser, Message, Theme, Renderer>>
     for Element<'a, Message, Theme, Renderer>
 where
-    Highlighter: text::Highlighter,
+    Parser: text::Parser,
     Message: 'a,
     Theme: Catalog + 'a,
     Renderer: text::Renderer,
 {
-    fn from(text_editor: TextEditor<'a, Highlighter, Message, Theme, Renderer>) -> Self {
+    fn from(text_editor: TextEditor<'a, Parser, Message, Theme, Renderer>) -> Self {
         Self::new(text_editor)
     }
 }
@@ -813,14 +809,14 @@ pub fn default(theme: &Theme, status: Status) -> Style {
     let palette = theme.palette();
 
     let active = Style {
-        background: Background::Color(palette.background.base.color),
+        background: Background::Color(palette.background.weakest.color),
         border: Border {
             radius: 2.0.into(),
             width: 1.0,
             color: palette.background.strong.color,
         },
         placeholder: palette.secondary.base.color,
-        value: palette.background.base.text,
+        value: palette.background.weakest.text,
         selection: palette.primary.weak.color,
     };
 
@@ -841,7 +837,7 @@ pub fn default(theme: &Theme, status: Status) -> Style {
             ..active
         },
         Status::Disabled => Style {
-            background: Background::Color(palette.background.weak.color),
+            background: Background::Color(palette.background.base.color),
             value: active.placeholder,
             placeholder: palette.background.strongest.color,
             ..active

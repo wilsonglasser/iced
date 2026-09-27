@@ -10,11 +10,10 @@ pub use selectable::Selectable;
 pub use text_input::TextInput;
 
 use crate::widget::Id;
-use crate::{Rectangle, Vector};
+use crate::{Rectangle, Size, Vector};
 
 use std::any::Any;
 use std::fmt;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// A piece of logic that can traverse the widget tree of an application in
@@ -29,14 +28,14 @@ pub trait Operation<T = ()>: Send {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<T>));
 
     /// Operates on a widget that contains other widgets.
-    fn container(&mut self, _id: Option<&Id>, _bounds: Rectangle) {}
+    fn container(&mut self, _id: Option<&Id>, _bounds: Rectangle, _viewport: &Rectangle) {}
 
     /// Operates on a widget that can be scrolled.
     fn scrollable(
         &mut self,
         _id: Option<&Id>,
         _bounds: Rectangle,
-        _content_bounds: Rectangle,
+        _content: Size,
         _translation: Vector,
         _state: &mut dyn Scrollable,
     ) {
@@ -71,8 +70,8 @@ where
         self.as_mut().traverse(operate);
     }
 
-    fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
-        self.as_mut().container(id, bounds);
+    fn container(&mut self, id: Option<&Id>, bounds: Rectangle, viewport: &Rectangle) {
+        self.as_mut().container(id, bounds, viewport);
     }
 
     fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Focusable) {
@@ -83,12 +82,12 @@ where
         &mut self,
         id: Option<&Id>,
         bounds: Rectangle,
-        content_bounds: Rectangle,
+        content: Size,
         translation: Vector,
         state: &mut dyn Scrollable,
     ) {
         self.as_mut()
-            .scrollable(id, bounds, content_bounds, translation, state);
+            .scrollable(id, bounds, content, translation, state);
     }
 
     fn text_input(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn TextInput) {
@@ -137,6 +136,25 @@ where
     }
 }
 
+/// The animation to apply to a state change, as requested by an
+/// [`Operation`].
+///
+/// Some widgets can apply a state change either immediately or with an
+/// animation; operations on those widgets take an [`Animation`] to select
+/// which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Animation {
+    /// Use the default animation of the widget.
+    #[default]
+    Auto,
+
+    /// Apply the change immediately.
+    Instant,
+
+    /// Animate the change towards the new state.
+    Smooth,
+}
+
 /// Wraps the [`Operation`] in a black box, erasing its returning type.
 pub fn black_box<'a, T, O>(operation: &'a mut dyn Operation<T>) -> impl Operation<O> + 'a
 where
@@ -156,8 +174,8 @@ where
             });
         }
 
-        fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
-            self.operation.container(id, bounds);
+        fn container(&mut self, id: Option<&Id>, bounds: Rectangle, viewport: &Rectangle) {
+            self.operation.container(id, bounds, viewport);
         }
 
         fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Focusable) {
@@ -168,12 +186,12 @@ where
             &mut self,
             id: Option<&Id>,
             bounds: Rectangle,
-            content_bounds: Rectangle,
+            content: Size,
             translation: Vector,
             state: &mut dyn Scrollable,
         ) {
             self.operation
-                .scrollable(id, bounds, content_bounds, translation, state);
+                .scrollable(id, bounds, content, translation, state);
         }
 
         fn text_input(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn TextInput) {
@@ -232,22 +250,22 @@ where
                     });
                 }
 
-                fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
+                fn container(&mut self, id: Option<&Id>, bounds: Rectangle, viewport: &Rectangle) {
                     let Self { operation, .. } = self;
 
-                    operation.container(id, bounds);
+                    operation.container(id, bounds, viewport);
                 }
 
                 fn scrollable(
                     &mut self,
                     id: Option<&Id>,
                     bounds: Rectangle,
-                    content_bounds: Rectangle,
+                    content: Size,
                     translation: Vector,
                     state: &mut dyn Scrollable,
                 ) {
                     self.operation
-                        .scrollable(id, bounds, content_bounds, translation, state);
+                        .scrollable(id, bounds, content, translation, state);
                 }
 
                 fn focusable(
@@ -291,8 +309,8 @@ where
             });
         }
 
-        fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
-            self.operation.container(id, bounds);
+        fn container(&mut self, id: Option<&Id>, bounds: Rectangle, viewport: &Rectangle) {
+            self.operation.container(id, bounds, viewport);
         }
 
         fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Focusable) {
@@ -303,12 +321,12 @@ where
             &mut self,
             id: Option<&Id>,
             bounds: Rectangle,
-            content_bounds: Rectangle,
+            content: Size,
             translation: Vector,
             state: &mut dyn Scrollable,
         ) {
             self.operation
-                .scrollable(id, bounds, content_bounds, translation, state);
+                .scrollable(id, bounds, content, translation, state);
         }
 
         fn text_input(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn TextInput) {
@@ -347,28 +365,26 @@ where
 
 /// Chains the output of an [`Operation`] with the provided function to
 /// build a new [`Operation`].
-pub fn then<A, B, O>(operation: impl Operation<A> + 'static, f: fn(A) -> O) -> impl Operation<B>
+pub fn then<A, B, O>(
+    operation: impl Operation<A> + 'static,
+    next: impl Fn(A) -> O + Send + Sync + 'static,
+) -> impl Operation<B>
 where
     A: 'static,
-    B: Send + 'static,
+    B: 'static,
     O: Operation<B> + 'static,
 {
-    struct Chain<T, O, A, B>
-    where
-        T: Operation<A>,
-        O: Operation<B>,
-    {
+    struct Chain<T, O, A> {
         operation: T,
-        next: fn(A) -> O,
-        _result: PhantomData<B>,
+        next: Arc<dyn Fn(A) -> O + Send + Sync>,
     }
 
-    impl<T, O, A, B> Operation<B> for Chain<T, O, A, B>
+    impl<T, O, A, B> Operation<B> for Chain<T, O, A>
     where
         T: Operation<A> + 'static,
         O: Operation<B> + 'static,
         A: 'static,
-        B: Send + 'static,
+        B: 'static,
     {
         fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<B>)) {
             self.operation.traverse(&mut |operation| {
@@ -376,8 +392,8 @@ where
             });
         }
 
-        fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
-            self.operation.container(id, bounds);
+        fn container(&mut self, id: Option<&Id>, bounds: Rectangle, viewport: &Rectangle) {
+            self.operation.container(id, bounds, viewport);
         }
 
         fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Focusable) {
@@ -388,12 +404,12 @@ where
             &mut self,
             id: Option<&Id>,
             bounds: Rectangle,
-            content_bounds: Rectangle,
+            content: Size,
             translation: crate::Vector,
             state: &mut dyn Scrollable,
         ) {
             self.operation
-                .scrollable(id, bounds, content_bounds, translation, state);
+                .scrollable(id, bounds, content, translation, state);
         }
 
         fn text_input(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn TextInput) {
@@ -416,15 +432,17 @@ where
             match self.operation.finish() {
                 Outcome::None => Outcome::None,
                 Outcome::Some(value) => Outcome::Chain(Box::new((self.next)(value))),
-                Outcome::Chain(operation) => Outcome::Chain(Box::new(then(operation, self.next))),
+                Outcome::Chain(next) => Outcome::Chain(Box::new(Chain {
+                    operation: next,
+                    next: self.next.clone(),
+                })),
             }
         }
     }
 
     Chain {
         operation,
-        next: f,
-        _result: PhantomData,
+        next: Arc::new(next),
     }
 }
 
@@ -448,7 +466,7 @@ pub fn scope<T: 'static>(target: Id, operation: impl Operation<T> + 'static) -> 
             self.current = None;
         }
 
-        fn container(&mut self, id: Option<&Id>, _bounds: Rectangle) {
+        fn container(&mut self, id: Option<&Id>, _bounds: Rectangle, _viewport: &Rectangle) {
             self.current = id.cloned();
         }
 

@@ -66,8 +66,10 @@ use crate::core::text::input;
 use crate::core::widget::operation::Focusable as _;
 use crate::core::widget::{self, Widget};
 use crate::core::window;
-use crate::core::{Element, Event, Length, Padding, Pixels, Rectangle, Shell, Size, Theme, Vector};
-use crate::overlay::menu;
+use crate::core::{
+    Element, Event, Font, Length, Padding, Pixels, Rectangle, Shell, Size, Theme, Vector,
+};
+use crate::overlay::menu::{self, Menu};
 use crate::text::LineHeight;
 use crate::text_input;
 
@@ -130,18 +132,17 @@ use std::sync::atomic::{self, AtomicU64};
 ///     }
 /// }
 /// ```
-pub struct ComboBox<'a, T, Message, Theme = crate::Theme, Renderer = crate::Renderer>
+pub struct ComboBox<'a, T, Message, Theme = crate::Theme>
 where
     Theme: Catalog,
-    Renderer: text::Renderer,
 {
     state: &'a State<T>,
     id: Option<widget::Id>,
     placeholder: text::Fragment<'a>,
     selection: String,
     width: Length,
-    line_height: LineHeight,
-    font: Option<Renderer::Font>,
+    line_height: Option<LineHeight>,
+    font: Option<Font>,
     on_selected: Box<dyn Fn(T) -> Message + 'a>,
     on_option_hovered: Option<Box<dyn Fn(T) -> Message + 'a>>,
     on_open: Option<Message>,
@@ -157,11 +158,10 @@ where
     last_status: Option<text_input::Status>,
 }
 
-impl<'a, T, Message, Theme, Renderer> ComboBox<'a, T, Message, Theme, Renderer>
+impl<'a, T, Message, Theme> ComboBox<'a, T, Message, Theme>
 where
     T: std::fmt::Display + Clone,
     Theme: Catalog,
-    Renderer: text::Renderer,
 {
     /// Creates a new [`ComboBox`] with the given list of options, a placeholder,
     /// the current selected value, and the message to produce when an option is
@@ -178,7 +178,7 @@ where
             placeholder: placeholder.into_fragment(),
             selection: selection.map(T::to_string).unwrap_or_default(),
             width: Length::Fill,
-            line_height: LineHeight::default(),
+            line_height: None,
             font: None,
             on_selected: Box::new(on_selected),
             on_option_hovered: None,
@@ -191,7 +191,7 @@ where
             ellipsis: text::Ellipsis::End,
             input_class: <Theme as Catalog>::default_input(),
             menu_class: <Theme as Catalog>::default_menu(),
-            menu_height: Length::Shrink,
+            menu_height: Length::Fit,
             last_status: None,
         }
     }
@@ -236,10 +236,10 @@ where
         self
     }
 
-    /// Sets the [`Renderer::Font`] of the [`ComboBox`].
+    /// Sets the [`Font`] of the [`ComboBox`].
     ///
-    /// [`Renderer::Font`]: text::Renderer
-    pub fn font(mut self, font: Renderer::Font) -> Self {
+    /// [`Font`]: crate::core::Font
+    pub fn font(mut self, font: Font) -> Self {
         self.font = Some(font);
         self
     }
@@ -258,7 +258,7 @@ where
 
     /// Sets the [`LineHeight`] of the [`ComboBox`].
     pub fn line_height(mut self, line_height: impl Into<LineHeight>) -> Self {
-        self.line_height = line_height.into();
+        self.line_height = Some(line_height.into());
         self
     }
 
@@ -403,7 +403,7 @@ struct Editor<R: text::Renderer> {
 }
 
 impl<T, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
-    for ComboBox<'_, T, Message, Theme, Renderer>
+    for ComboBox<'_, T, Message, Theme>
 where
     T: Display + Clone + 'static,
     Message: Clone,
@@ -417,15 +417,10 @@ where
         }
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut widget::Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
+    fn layout(&mut self, tree: &mut widget::Tree, renderer: &Renderer, limits: &layout::Limits) {
         let state = tree.state.downcast_mut::<Internal<T, Renderer>>();
 
-        state.editor.input.layout(
+        tree.size = state.editor.input.layout(
             renderer,
             limits,
             input::Layout {
@@ -440,7 +435,7 @@ where
                 multiline: None,
                 is_secure: false,
             },
-        )
+        );
     }
 
     fn tag(&self) -> widget::tree::Tag {
@@ -470,7 +465,6 @@ where
             state.editor.input.overwrite(&self.selection);
             state.editor.selection = Some(self.selection.clone());
             state.filter(&self.state.options, &self.selection);
-
             state.version = self.state.version;
         }
     }
@@ -479,7 +473,7 @@ where
         &mut self,
         tree: &mut widget::Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         _renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
@@ -637,7 +631,7 @@ where
     fn mouse_interaction(
         &self,
         _tree: &widget::Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
         _renderer: &Renderer,
@@ -655,7 +649,7 @@ where
         renderer: &mut Renderer,
         theme: &Theme,
         _style: &renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         _cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
@@ -692,37 +686,31 @@ where
     fn overlay<'b>(
         &'b mut self,
         tree: &'b mut widget::Tree,
-        layout: Layout<'_>,
-        _renderer: &Renderer,
-        viewport: &Rectangle,
+        layout: Layout,
+        renderer: &Renderer,
+        _viewport: &Rectangle,
         translation: Vector,
-    ) -> Option<overlay::Element<'b, Message, Theme, Renderer>> {
+        window: Size,
+    ) -> Vec<overlay::Element<'b, Message, Theme, Renderer>> {
         let internal = tree.state.downcast_mut::<Internal<T, Renderer>>();
         let is_focused = internal.editor.input.is_focused();
 
         if is_focused {
-            let Internal {
-                menu,
-                filtered_options,
-                hovered_option,
-                editor,
-                ..
-            } = tree.state.downcast_mut::<Internal<T, Renderer>>();
-
-            if filtered_options.is_empty() {
-                None
+            if internal.filtered_options.is_empty() {
+                Vec::new()
             } else {
                 let bounds = layout.bounds();
+                let position = layout.position() + translation;
 
-                let mut menu = menu::Menu::new(
-                    menu,
-                    filtered_options,
-                    hovered_option,
+                let mut menu = Menu::new(
+                    &mut internal.menu,
+                    &internal.filtered_options,
+                    &mut internal.hovered_option,
                     &T::to_string,
                     |selection| {
-                        editor.selection = None;
-                        editor.input.overwrite("");
-                        editor.input.unfocus();
+                        internal.editor.selection = None;
+                        internal.editor.input.overwrite("");
+                        internal.editor.input.unfocus();
 
                         (self.on_selected)(selection)
                     },
@@ -730,6 +718,7 @@ where
                     &self.menu_class,
                 )
                 .width(bounds.width)
+                .height(self.menu_height)
                 .padding(self.padding)
                 .shaping(self.shaping)
                 .ellipsis(self.ellipsis);
@@ -742,22 +731,18 @@ where
                     menu = menu.text_size(size);
                 }
 
-                Some(menu.overlay(
-                    layout.position() + translation,
-                    *viewport,
-                    bounds.height,
-                    self.menu_height,
-                ))
+                vec![menu.overlay(renderer, position, window, bounds.height)]
             }
         } else {
-            None
+            Vec::new()
         }
     }
 
     fn operate(
         &mut self,
         tree: &mut widget::Tree,
-        layout: Layout<'_>,
+        layout: Layout,
+        _viewport: &Rectangle,
         _renderer: &Renderer,
         operation: &mut dyn widget::Operation,
     ) {
@@ -769,7 +754,7 @@ where
     }
 }
 
-impl<'a, T, Message, Theme, Renderer> From<ComboBox<'a, T, Message, Theme, Renderer>>
+impl<'a, T, Message, Theme, Renderer> From<ComboBox<'a, T, Message, Theme>>
     for Element<'a, Message, Theme, Renderer>
 where
     T: Display + Clone + 'static,
@@ -777,7 +762,7 @@ where
     Theme: Catalog + 'a,
     Renderer: text::Renderer + 'static,
 {
-    fn from(combo_box: ComboBox<'a, T, Message, Theme, Renderer>) -> Self {
+    fn from(combo_box: ComboBox<'a, T, Message, Theme>) -> Self {
         Self::new(combo_box)
     }
 }

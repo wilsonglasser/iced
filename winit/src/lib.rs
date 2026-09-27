@@ -42,7 +42,7 @@ use crate::core::mouse;
 use crate::core::renderer;
 use crate::core::shell;
 use crate::core::theme;
-use crate::core::time::Instant;
+use crate::core::time::{Duration, Instant};
 use crate::core::widget::operation;
 use crate::core::{Point, Renderer, Size};
 use crate::futures::futures::channel::mpsc;
@@ -129,7 +129,7 @@ where
     let (control_sender, control_receiver) = mpsc::unbounded();
     let (system_theme_sender, system_theme_receiver) = oneshot::channel();
 
-    let instance = Box::pin(run_instance::<P>(
+    let instance: std::pin::Pin<Box<dyn Future<Output = ()>>> = Box::pin(run_instance::<P>(
         program,
         runtime,
         proxy.clone(),
@@ -145,8 +145,8 @@ where
 
     let context = task::Context::from_waker(task::noop_waker_ref());
 
-    struct Runner<Message: 'static, F> {
-        instance: std::pin::Pin<Box<F>>,
+    struct Runner<Message: 'static> {
+        instance: std::pin::Pin<Box<dyn Future<Output = ()>>>,
         context: task::Context<'static>,
         id: Option<String>,
         sender: mpsc::UnboundedSender<Event<Action<Message>>>,
@@ -187,10 +187,7 @@ where
 
     boot_span.finish();
 
-    impl<Message, F> winit::application::ApplicationHandler for Runner<Message, F>
-    where
-        F: Future<Output = ()>,
-    {
+    impl<Message> winit::application::ApplicationHandler for Runner<Message> {
         fn can_create_surfaces(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop) {
             // `resumed` is where this lived until `winit 0.31`, but there it is documented as
             // unsupported on every desktop platform, so it would simply never fire. This one is
@@ -326,19 +323,13 @@ where
     }
 
     #[cfg(target_os = "macos")]
-    impl<Message, F> winit::platform::macos::ApplicationHandlerExtMacOS for Runner<Message, F>
-    where
-        F: Future<Output = ()>,
-    {
+    impl<Message> winit::platform::macos::ApplicationHandlerExtMacOS for Runner<Message> {
         fn received_url(&mut self, event_loop: &dyn winit::event_loop::ActiveEventLoop, url: String) {
             self.process_event(event_loop, Event::EventLoopAwakened(Awakening::ReceivedUrl(url)));
         }
     }
 
-    impl<Message, F> Runner<Message, F>
-    where
-        F: Future<Output = ()>,
-    {
+    impl<Message> Runner<Message> {
         fn process_event(
             &mut self,
             event_loop: &dyn winit::event_loop::ActiveEventLoop,
@@ -363,9 +354,9 @@ where
                                     (
                                         ControlFlow::WaitUntil(current),
                                         ControlFlow::WaitUntil(new),
-                                    ) if current < new => {}
-                                    (ControlFlow::WaitUntil(target), ControlFlow::Wait)
-                                        if target > Instant::now() => {}
+                                    ) if current > Instant::now() && current < new => {}
+                                    (ControlFlow::WaitUntil(current), ControlFlow::Wait)
+                                        if current > Instant::now() => {}
                                     _ => {
                                         event_loop.set_control_flow(flow);
                                     }
@@ -934,17 +925,26 @@ async fn run_instance<P>(
                                 &mut messages,
                             );
 
-                            if message_count == messages.len() && !state.has_layout_changed() {
-                                break state;
-                            }
-
                             if redraw_count >= 2 {
                                 log::warn!(
-                                    "More than 3 consecutive RedrawRequested events \
-                                    produced layout invalidation"
+                                    "3 consecutive RedrawRequested events produced invalidation"
                                 );
 
                                 break state;
+                            }
+
+                            if message_count == messages.len() {
+                                match state {
+                                    user_interface::State::Outdated => {}
+                                    user_interface::State::Updated { change, .. } => match change {
+                                        user_interface::Change::None => break state,
+                                        user_interface::Change::Overlay => {
+                                            redraw_count += 1;
+                                            continue;
+                                        }
+                                        user_interface::Change::Layout => {}
+                                    },
+                                }
                             }
 
                             redraw_count += 1;
@@ -1084,41 +1084,51 @@ async fn run_instance<P>(
                                     // This is an unrecoverable error.
                                     panic!("{error:?}");
                                 }
-                                compositor::SurfaceError::Outdated
-                                | compositor::SurfaceError::Lost => {
-                                    present_span.finish();
-
-                                    // Reconfigure surface and try redrawing
-                                    let physical_size = window.state.physical_size();
-
-                                    if error == compositor::SurfaceError::Lost {
-                                        window.surface = current_compositor.create_surface(
-                                            window.raw.clone(),
-                                            physical_size.width,
-                                            physical_size.height,
-                                        );
-                                    } else {
-                                        current_compositor.configure_surface(
-                                            &mut window.surface,
-                                            physical_size.width,
-                                            physical_size.height,
-                                        );
-                                    }
-
-                                    window.raw.request_redraw();
-                                }
                                 compositor::SurfaceError::Occluded => {
                                     present_span.finish();
 
                                     // Do nothing and wait for window to become visible again
                                 }
-                                _ => {
+                                compositor::SurfaceError::Timeout => {
                                     present_span.finish();
 
-                                    log::warn!("Error {error:?} when presenting surface.");
+                                    window.raw.request_redraw();
+                                }
+                                compositor::SurfaceError::Lost
+                                | compositor::SurfaceError::Outdated
+                                | compositor::SurfaceError::Other => {
+                                    present_span.finish();
 
-                                    // Try rendering all windows again next frame.
-                                    for (_id, window) in window_manager.iter_mut() {
+                                    // Reconfigure or recreate at most once a second,
+                                    // and do not request a redraw in between, so a
+                                    // surface that keeps failing cannot spin the loop.
+                                    let due = window
+                                        .surface_error_at
+                                        .is_none_or(|at| at.elapsed() > Duration::from_secs(1));
+
+                                    if due {
+                                        window.surface_error_at = Some(Instant::now());
+
+                                        log::warn!(
+                                            "Error {error:?} when presenting surface. Recovering it."
+                                        );
+
+                                        let physical_size = window.state.physical_size();
+
+                                        if matches!(error, compositor::SurfaceError::Outdated) {
+                                            current_compositor.configure_surface(
+                                                &mut window.surface,
+                                                physical_size.width,
+                                                physical_size.height,
+                                            );
+                                        } else {
+                                            window.surface = current_compositor.create_surface(
+                                                window.raw.clone(),
+                                                physical_size.width,
+                                                physical_size.height,
+                                            );
+                                        }
+
                                         window.raw.request_redraw();
                                     }
                                 }
@@ -1848,8 +1858,8 @@ fn run_action<'a, P, C>(
                 }
             }
             font::Action::SetDefaults { font, text_size } => {
-                renderer_settings.default_font = font;
-                renderer_settings.default_text_size = text_size;
+                renderer_settings.font = font;
+                renderer_settings.text_size = text_size;
 
                 let Some(compositor) = compositor else {
                     return;

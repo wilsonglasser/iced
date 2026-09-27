@@ -72,12 +72,12 @@ impl Test {
         let settings = markdown::Settings {
             selectable: true,
             group_selection: true,
-            ..markdown::Settings::with_style(&self.theme)
+            ..markdown::Settings::default()
         };
 
-        let md_a: Element<'_, _> = markdown::view(self.md_a.items(), settings)
+        let md_a: Element<'_, _> = markdown::view(self.md_a.items(), settings, self.theme.clone())
             .map(Message::LinkClicked);
-        let md_b: Element<'_, _> = markdown::view(self.md_b.items(), settings)
+        let md_b: Element<'_, _> = markdown::view(self.md_b.items(), settings, self.theme.clone())
             .map(Message::LinkClicked);
 
         // Custom selectable_group mixing plain text and rich_text in a

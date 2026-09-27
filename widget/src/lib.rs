@@ -38,6 +38,7 @@ pub mod selectable_group;
 pub mod sensor;
 pub mod slider;
 pub mod space;
+pub mod sticky;
 pub mod table;
 pub mod text;
 pub mod text_editor;
@@ -99,6 +100,8 @@ pub use slider::Slider;
 pub use space::Space;
 #[doc(no_inline)]
 pub use stack::Stack;
+#[doc(no_inline)]
+pub use sticky::Sticky;
 #[doc(no_inline)]
 pub use text::Text;
 #[doc(no_inline)]

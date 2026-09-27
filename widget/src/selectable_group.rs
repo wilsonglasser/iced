@@ -98,27 +98,29 @@ where
         self.content.as_widget().size()
     }
 
-    fn layout(
-        &mut self,
-        tree: &mut Tree,
-        renderer: &Renderer,
-        limits: &layout::Limits,
-    ) -> layout::Node {
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
         self.content
             .as_widget_mut()
-            .layout(&mut tree.children[0], renderer, limits)
+            .layout(&mut tree.children[0], renderer, limits);
+
+        tree.size = tree.children[0].size;
     }
 
     fn operate(
         &mut self,
         tree: &mut Tree,
-        layout: Layout<'_>,
+        layout: Layout,
+        viewport: &Rectangle,
         renderer: &Renderer,
         operation: &mut dyn core::widget::Operation,
     ) {
-        self.content
-            .as_widget_mut()
-            .operate(&mut tree.children[0], layout, renderer, operation);
+        self.content.as_widget_mut().operate(
+            &mut tree.children[0],
+            layout,
+            viewport,
+            renderer,
+            operation,
+        );
     }
 
     fn draw(
@@ -127,7 +129,7 @@ where
         renderer: &mut Renderer,
         theme: &Theme,
         defaults: &renderer::Style,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
@@ -145,7 +147,7 @@ where
     fn mouse_interaction(
         &self,
         tree: &Tree,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         viewport: &Rectangle,
         renderer: &Renderer,
@@ -163,7 +165,7 @@ where
         &mut self,
         tree: &mut Tree,
         event: &Event,
-        layout: Layout<'_>,
+        layout: Layout,
         cursor: mouse::Cursor,
         renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
@@ -563,7 +565,7 @@ enum KeyAction {
 fn apply_keyboard_action<Message, Theme, Renderer>(
     content: &mut Element<'_, Message, Theme, Renderer>,
     tree: &mut Tree,
-    layout: Layout<'_>,
+    layout: Layout,
     renderer: &Renderer,
     action: KeyAction,
     extend: bool,
@@ -702,7 +704,7 @@ fn apply_keyboard_action<Message, Theme, Renderer>(
 fn hit_test_sibling<Message, Theme, Renderer>(
     content: &mut Element<'_, Message, Theme, Renderer>,
     tree: &mut Tree,
-    layout: Layout<'_>,
+    layout: Layout,
     renderer: &Renderer,
     focus_idx: usize,
     dir: i32,
@@ -798,7 +800,7 @@ fn selection_range_for(
 fn visit_selectables<Message, Theme, Renderer, F>(
     content: &mut Element<'_, Message, Theme, Renderer>,
     tree: &mut Tree,
-    layout: Layout<'_>,
+    layout: Layout,
     renderer: &Renderer,
     callback: F,
 ) where
@@ -833,9 +835,11 @@ fn visit_selectables<Message, Theme, Renderer, F>(
         counter: 0,
         callback,
     };
+    // Every selectable in the group, visible or not: a drag that
+    // extends past the viewport still has to reach the widgets it covers.
     content
         .as_widget_mut()
-        .operate(tree, layout, renderer, &mut visitor);
+        .operate(tree, layout, &Rectangle::INFINITE, renderer, &mut visitor);
 }
 
 impl<'a, Link, Message, Theme, Renderer> From<SelectableGroup<'a, Link, Message, Theme, Renderer>>
