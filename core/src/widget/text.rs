@@ -4,8 +4,9 @@
 //! ```no_run
 //! # mod iced { pub mod widget { pub fn text<T>(t: T) -> iced_core::widget::Text<'static, iced_core::Theme> { unimplemented!() } }
 //! #            pub use iced_core::color; }
+//! # pub trait Widget<Message>: iced_core::Widget<Message, iced_core::Theme, ()> {}
+//! # impl<T, Message> Widget<Message> for T where T: iced_core::Widget<Message, iced_core::Theme, ()> {}
 //! # pub type State = ();
-//! # pub type Element<'a, Message> = iced_core::Element<'a, Message, iced_core::Theme, ()>;
 //! use iced::widget::text;
 //! use iced::color;
 //!
@@ -13,26 +14,23 @@
 //!     // ...
 //! }
 //!
-//! fn view(state: &State) -> Element<'_, Message> {
+//! fn view(state: &State) -> impl Widget<Message> {
 //!     text("Hello, this is iced!")
 //!         .size(20)
 //!         .color(color!(0x0000ff))
-//!         .into()
 //! }
 //! ```
 use crate::alignment;
-use crate::clipboard;
-use crate::keyboard;
 use crate::layout;
 use crate::mouse;
 use crate::renderer;
-use crate::text;
 use crate::text::paragraph::{self, Paragraph};
+use crate::text::{self, Target};
+use crate::widget;
+use crate::widget::operation;
 use crate::widget::tree::{self, Tree};
-use crate::{
-    Color, Element, Event, Font, Layout, Length, Pixels, Point, Rectangle, Shell, Size, Theme,
-    Widget,
-};
+use crate::window;
+use crate::{Color, Event, Font, Layout, Length, Pixels, Point, Rectangle, Size, Theme, Widget};
 
 pub use text::{Alignment, Ellipsis, LineHeight, Position, Shaping, Wrapping};
 
@@ -42,8 +40,9 @@ pub use text::{Alignment, Ellipsis, LineHeight, Position, Shaping, Wrapping};
 /// ```no_run
 /// # mod iced { pub mod widget { pub fn text<T>(t: T) -> iced_core::widget::Text<'static, iced_core::Theme> { unimplemented!() } }
 /// #            pub use iced_core::color; }
+/// # pub trait Widget<Message>: iced_core::Widget<Message, iced_core::Theme, ()> {}
+/// # impl<T, Message> Widget<Message> for T where T: iced_core::Widget<Message, iced_core::Theme, ()> {}
 /// # pub type State = ();
-/// # pub type Element<'a, Message> = iced_core::Element<'a, Message, iced_core::Theme, ()>;
 /// use iced::widget::text;
 /// use iced::color;
 ///
@@ -51,11 +50,10 @@ pub use text::{Alignment, Ellipsis, LineHeight, Position, Shaping, Wrapping};
 ///     // ...
 /// }
 ///
-/// fn view(state: &State) -> Element<'_, Message> {
+/// fn view(state: &State) -> impl Widget<Message> {
 ///     text("Hello, this is iced!")
 ///         .size(20)
 ///         .color(color!(0x0000ff))
-///         .into()
 /// }
 /// ```
 #[must_use]
@@ -65,8 +63,8 @@ where
 {
     fragment: text::Fragment<'a>,
     format: Format,
-    class: Theme::Class<'a>,
     selectable: bool,
+    class: Theme::Class<'a>,
 }
 
 impl<'a, Theme> Text<'a, Theme>
@@ -78,16 +76,9 @@ where
         Text {
             fragment: fragment.into_fragment(),
             format: Format::default(),
-            class: Theme::default(),
             selectable: false,
+            class: Theme::default(),
         }
-    }
-
-    /// Allows the user to drag-select the [`Text`] and copy it with
-    /// `Ctrl+C` while focused. Off by default.
-    pub fn selectable(mut self, selectable: bool) -> Self {
-        self.selectable = selectable;
-        self
     }
 
     /// Sets the size of the [`Text`].
@@ -162,6 +153,14 @@ where
         self
     }
 
+    /// Sets whether the [`Text`] can be selected.
+    ///
+    /// By default, it is `false`.
+    pub fn selectable(mut self, selectable: bool) -> Self {
+        self.selectable = selectable;
+        self
+    }
+
     /// Sets the style of the [`Text`].
     pub fn style(mut self, style: impl Fn(&Theme) -> Style + 'a) -> Self
     where
@@ -186,13 +185,9 @@ where
     {
         let color = color.map(Into::into);
 
-        // Inherit the rest of the style (notably `selection`) from the
-        // theme's default class instead of `Style::default()` — which
-        // has a transparent `selection` and would silently disable
-        // selection highlights for any `text(...).color(...)` widget.
-        self.style(move |theme: &Theme| Style {
+        self.style(move |_theme| Style {
             color,
-            ..theme.style(&<Theme as Catalog>::default())
+            selection: None,
         })
     }
 
@@ -204,103 +199,13 @@ where
     }
 }
 
-/// The internal state of a [`Text`] paragraph as used by label-style
-/// widgets (e.g. `checkbox`, `radio`, `toggler`). The [`Text`] widget
-/// itself uses a private state that wraps this with selection tracking.
-pub type State<P> = paragraph::Plain<P>;
-
-struct Internal<P: Paragraph> {
-    paragraph: paragraph::Plain<P>,
-    /// Cached fragment so the [`Selectable`] trait helpers can walk
-    /// codepoints / words without a fresh allocation per keystroke
-    /// and without carrying a reference to the widget. Refreshed on
-    /// every layout pass.
-    ///
-    /// [`Selectable`]: crate::widget::operation::Selectable
-    text: String,
-    selection: Option<(usize, usize)>,
-    selecting: bool,
-    focused: bool,
-    /// Set by [`selectable_group`] (or any coordinator using
-    /// [`Operation::selectable`]) to suppress this widget's own drag
-    /// and `Ctrl+C` handling — the coordinator owns those while it's
-    /// in the tree.
-    ///
-    /// [`Operation::selectable`]: crate::widget::operation::Operation::selectable
-    externally_managed: bool,
-    /// Most recent left-click; chained into `mouse::Click::new` so
-    /// repeated presses within iced's threshold escalate Single →
-    /// Double → Triple.
-    last_click: Option<mouse::Click>,
-}
-
-impl<P: Paragraph> Default for Internal<P> {
-    fn default() -> Self {
-        Self {
-            paragraph: paragraph::Plain::default(),
-            text: String::new(),
-            selection: None,
-            selecting: false,
-            focused: false,
-            externally_managed: false,
-            last_click: None,
-        }
-    }
-}
-
-impl<P: Paragraph> crate::widget::operation::Selectable for Internal<P> {
-    fn selection(&self) -> Option<(usize, usize)> {
-        self.selection
-    }
-
-    fn set_selection(&mut self, range: Option<(usize, usize)>) {
-        self.selection = range;
-    }
-
-    fn text(&self) -> &str {
-        &self.text
-    }
-
-    fn byte_position(&self, byte: usize) -> Option<Point> {
-        self.paragraph.raw().byte_position(byte)
-    }
-
-    fn hit_test(&self, point: Point) -> Option<usize> {
-        self.paragraph
-            .raw()
-            .hit_test(point)
-            .map(text::Hit::cursor)
-    }
-
-    fn visual_line_height(&self) -> Option<f32> {
-        self.paragraph.raw().visual_line_height()
-    }
-
-    fn min_bounds_height(&self) -> f32 {
-        self.paragraph.raw().min_bounds().height
-    }
-
-    fn set_externally_managed(&mut self, value: bool) {
-        self.externally_managed = value;
-        if value {
-            self.selecting = false;
-        }
-    }
-}
+impl<Theme> widget::Meta for Text<'_, Theme> where Theme: Catalog {}
 
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for Text<'_, Theme>
 where
     Theme: Catalog,
     Renderer: text::Renderer,
 {
-    fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<Internal<Renderer::Paragraph>>()
-    }
-
-    fn state(&self) -> tree::State {
-        tree::State::new(Internal::<Renderer::Paragraph>::default())
-    }
-
     fn size(&self) -> Size<Length> {
         Size {
             width: self.format.width,
@@ -308,22 +213,56 @@ where
         }
     }
 
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<State<Renderer::Paragraph>>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(State::<Renderer::Paragraph>::default())
+    }
+
     fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
-        let state = tree.state.downcast_mut::<Internal<Renderer::Paragraph>>();
+        let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
 
-        if state.text != *self.fragment {
-            state.text.clear();
-            state.text.push_str(&self.fragment);
-        }
-
-        let size = layout(
+        tree.size = layout(
             &mut state.paragraph,
             renderer,
             limits,
             &self.fragment,
             self.format,
         );
-        tree.size = size;
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &crate::Event,
+        layout: Layout,
+        cursor: mouse::Cursor,
+        _renderer: &Renderer,
+        _shell: &mut crate::Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
+        update::<Renderer::Paragraph>(tree, event, layout, cursor);
+    }
+
+    fn mouse_interaction(
+        &self,
+        tree: &Tree,
+        _layout: Layout,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+        _renderer: &Renderer,
+    ) -> mouse::Interaction {
+        if self.selectable {
+            let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
+
+            if state.is_hovered {
+                return mouse::Interaction::Text;
+            }
+        }
+
+        mouse::Interaction::None
     }
 
     fn draw(
@@ -336,30 +275,8 @@ where
         _cursor_position: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        let state = tree.state.downcast_ref::<Internal<Renderer::Paragraph>>();
+        let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
         let style = theme.style(&self.class);
-
-        if self.selectable
-            && let Some((a, b)) = state.selection
-        {
-            let (start, end) = if a <= b { (a, b) } else { (b, a) };
-            if start < end && style.selection.a > 0.0 {
-                let raw = state.paragraph.raw();
-                let anchor = layout
-                    .bounds()
-                    .anchor(raw.min_bounds(), raw.align_x(), raw.align_y());
-                let translation = anchor - Point::ORIGIN;
-                for bounds in raw.selection_bounds(start, end) {
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: bounds + translation,
-                            ..Default::default()
-                        },
-                        style.selection,
-                    );
-                }
-            }
-        }
 
         draw(
             renderer,
@@ -367,221 +284,9 @@ where
             layout.bounds(),
             state.paragraph.raw(),
             style,
+            theme.selection(),
             viewport,
         );
-    }
-
-    fn update(
-        &mut self,
-        tree: &mut Tree,
-        event: &Event,
-        layout: Layout,
-        cursor: mouse::Cursor,
-        _renderer: &Renderer,
-        shell: &mut Shell<'_, Message>,
-        _viewport: &Rectangle,
-    ) {
-        if !self.selectable {
-            return;
-        }
-
-        let cursor_in_bounds = cursor.position_in(layout.bounds());
-        let externally_managed = tree
-            .state
-            .downcast_ref::<Internal<Renderer::Paragraph>>()
-            .externally_managed;
-
-        match event {
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-                if !externally_managed =>
-            {
-                use crate::widget::operation::Selectable;
-
-                let state = tree.state.downcast_mut::<Internal<Renderer::Paragraph>>();
-
-                if let Some(position) = cursor_in_bounds
-                    && let Some(hit) = state.paragraph.raw().hit_test(position)
-                {
-                    let cursor_at = hit.cursor();
-                    let click =
-                        mouse::Click::new(position, mouse::Button::Left, state.last_click);
-
-                    match click.kind() {
-                        mouse::click::Kind::Single => {
-                            state.selection = Some((cursor_at, cursor_at));
-                            state.selecting = true;
-                        }
-                        mouse::click::Kind::Double => {
-                            let start = state.step_byte_word(cursor_at, -1);
-                            let end = state.step_byte_word(cursor_at, 1);
-                            state.selection = Some((start, end));
-                            state.selecting = false;
-                        }
-                        mouse::click::Kind::Triple => {
-                            let len = state.text.len();
-                            let start = state.line_edge_byte(cursor_at, -1).unwrap_or(0);
-                            let end = state.line_edge_byte(cursor_at, 1).unwrap_or(len);
-                            state.selection = Some((start, end));
-                            state.selecting = false;
-                        }
-                    }
-
-                    state.last_click = Some(click);
-                    state.focused = true;
-                    shell.capture_event();
-                    shell.request_redraw();
-                } else if state.selection.take().is_some() || state.focused {
-                    // Press outside this widget's text drops focus, so
-                    // siblings can self-clear on the same event.
-                    state.focused = false;
-                    state.last_click = None;
-                    shell.request_redraw();
-                }
-            }
-            Event::Mouse(mouse::Event::CursorMoved { .. }) if !externally_managed => {
-                let state = tree.state.downcast_mut::<Internal<Renderer::Paragraph>>();
-
-                if state.selecting
-                    && let Some(position) = cursor_in_bounds
-                    && let Some(hit) = state.paragraph.raw().hit_test(position)
-                {
-                    let new_focus = hit.cursor();
-                    if let Some((anchor, focus)) = state.selection
-                        && focus != new_focus
-                    {
-                        state.selection = Some((anchor, new_focus));
-                        shell.request_redraw();
-                    }
-                }
-            }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
-                if !externally_managed =>
-            {
-                let state = tree.state.downcast_mut::<Internal<Renderer::Paragraph>>();
-
-                if state.selecting {
-                    state.selecting = false;
-
-                    if let Some((a, b)) = state.selection
-                        && a == b
-                    {
-                        state.selection = None;
-                    }
-                }
-            }
-            Event::Keyboard(keyboard::Event::KeyPressed {
-                key: keyboard::Key::Character(c),
-                modifiers,
-                ..
-            }) if !externally_managed
-                && modifiers.command()
-                && matches!(c.as_str(), "c" | "C") =>
-            {
-                let state = tree.state.downcast_ref::<Internal<Renderer::Paragraph>>();
-                if state.focused
-                    && let Some((a, b)) = state.selection
-                {
-                    let (start, end) = if a <= b { (a, b) } else { (b, a) };
-                    if start < end {
-                        let extracted = self
-                            .fragment
-                            .get(
-                                floor_char_boundary(&self.fragment, start)
-                                    ..floor_char_boundary(&self.fragment, end),
-                            )
-                            .unwrap_or("")
-                            .to_owned();
-                        if !extracted.is_empty() {
-                            shell.write_clipboard(clipboard::Content::Text(extracted));
-                            shell.capture_event();
-                        }
-                    }
-                }
-            }
-            Event::Keyboard(keyboard::Event::KeyPressed {
-                key: keyboard::Key::Character(c),
-                modifiers,
-                ..
-            }) if !externally_managed
-                && modifiers.command()
-                && matches!(c.as_str(), "a" | "A") =>
-            {
-                let state = tree.state.downcast_mut::<Internal<Renderer::Paragraph>>();
-                if state.focused {
-                    let len = state.text.len();
-                    if len > 0 {
-                        state.selection = Some((0, len));
-                        shell.capture_event();
-                        shell.request_redraw();
-                    }
-                }
-            }
-            Event::Keyboard(keyboard::Event::KeyPressed {
-                key: keyboard::Key::Named(named),
-                modifiers,
-                ..
-            }) if !externally_managed => {
-                use crate::widget::operation::Selectable;
-
-                let state = tree.state.downcast_mut::<Internal<Renderer::Paragraph>>();
-
-                if !state.focused {
-                    return;
-                }
-
-                if matches!(named, keyboard::key::Named::Escape) {
-                    if state.selection.take().is_some() {
-                        state.focused = false;
-                        shell.capture_event();
-                        shell.request_redraw();
-                    }
-                    return;
-                }
-
-                if !modifiers.shift() {
-                    return;
-                }
-
-                let Some((dir, by_word)) = (match named {
-                    keyboard::key::Named::ArrowLeft if modifiers.command() => Some((-1, true)),
-                    keyboard::key::Named::ArrowRight if modifiers.command() => Some((1, true)),
-                    keyboard::key::Named::ArrowLeft => Some((-1, false)),
-                    keyboard::key::Named::ArrowRight => Some((1, false)),
-                    _ => None,
-                }) else {
-                    return;
-                };
-
-                let (anchor, focus) = state.selection.unwrap_or((0, 0));
-                let new_focus = if by_word {
-                    state.step_byte_word(focus, dir)
-                } else {
-                    state.step_byte(focus, dir)
-                };
-
-                if new_focus != focus {
-                    state.selection = Some((anchor, new_focus));
-                    shell.capture_event();
-                    shell.request_redraw();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn mouse_interaction(
-        &self,
-        _tree: &Tree,
-        layout: Layout,
-        cursor: mouse::Cursor,
-        _viewport: &Rectangle,
-        _renderer: &Renderer,
-    ) -> mouse::Interaction {
-        if self.selectable && cursor.is_over(layout.bounds()) {
-            mouse::Interaction::Text
-        } else {
-            mouse::Interaction::None
-        }
     }
 
     fn operate(
@@ -592,22 +297,154 @@ where
         _renderer: &Renderer,
         operation: &mut dyn super::Operation,
     ) {
-        operation.text(None, layout.bounds(), &self.fragment);
-        if self.selectable {
-            let state = tree.state.downcast_mut::<Internal<Renderer::Paragraph>>();
-            operation.selectable(None, layout.bounds(), state);
-        }
+        let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
+        operation.text(
+            None,
+            layout.bounds(),
+            &mut Operand {
+                paragraph: &mut state.paragraph,
+                layout,
+                selectable: self.selectable,
+            },
+        );
     }
 }
 
-fn floor_char_boundary(s: &str, mut idx: usize) -> usize {
-    if idx >= s.len() {
-        return s.len();
+impl widget::Meta for &str {}
+
+impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for &str
+where
+    Theme: Catalog,
+    Renderer: text::Renderer,
+{
+    fn size(&self) -> Size<Length> {
+        Size {
+            width: Length::Fit,
+            height: Length::Fit,
+        }
     }
-    while idx > 0 && !s.is_char_boundary(idx) {
-        idx -= 1;
+
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<State<Renderer::Paragraph>>()
     }
-    idx
+
+    fn state(&self) -> tree::State {
+        tree::State::new(State::<Renderer::Paragraph>::default())
+    }
+
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) {
+        let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
+
+        tree.size = layout(
+            &mut state.paragraph,
+            renderer,
+            limits,
+            self,
+            Format::default(),
+        );
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &Theme,
+        defaults: &renderer::Style,
+        layout: Layout,
+        _cursor_position: mouse::Cursor,
+        viewport: &Rectangle,
+    ) {
+        let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
+        let style = theme.style(&Theme::default());
+
+        draw(
+            renderer,
+            defaults,
+            layout.bounds(),
+            state.paragraph.raw(),
+            style,
+            theme.selection(),
+            viewport,
+        );
+    }
+
+    fn operate(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout,
+        _viewport: &Rectangle,
+        _renderer: &Renderer,
+        operation: &mut dyn super::Operation,
+    ) {
+        let state = tree.state.downcast_mut::<State<Renderer::Paragraph>>();
+        operation.text(
+            None,
+            layout.bounds(),
+            &mut Operand {
+                paragraph: &mut state.paragraph,
+                layout,
+                selectable: false,
+            },
+        );
+    }
+}
+
+#[derive(Default)]
+struct State<P: Paragraph> {
+    paragraph: paragraph::Plain<P>,
+    is_hovered: bool,
+}
+
+/// The state of a widget with text, operated on by [`super::Operation::text`].
+pub struct Operand<'a, P: Paragraph> {
+    /// The [`Paragraph`] of the widget.
+    pub paragraph: &'a mut paragraph::Plain<P>,
+
+    /// The layout of the widget.
+    pub layout: Layout,
+
+    /// Whether the text of the widget can be selected.
+    pub selectable: bool,
+}
+
+impl<P: Paragraph> operation::Text for Operand<'_, P> {
+    fn text(&self) -> text::Fragment<'_> {
+        self.paragraph.content().into()
+    }
+
+    fn select(&mut self, start: Point, end: Point, target: Target) {
+        if !self.selectable {
+            return;
+        }
+
+        let anchor = self.layout.bounds().anchor(
+            self.paragraph.min_bounds(),
+            self.paragraph.align_x(),
+            self.paragraph.align_y(),
+        );
+
+        let translation = anchor - Point::ORIGIN;
+
+        self.paragraph
+            .raw_mut()
+            .select(start - translation, end - translation, target);
+    }
+
+    fn select_all(&mut self) {
+        if !self.selectable {
+            return;
+        }
+
+        self.paragraph.raw_mut().select_all();
+    }
+
+    fn deselect(&mut self) {
+        self.paragraph.raw_mut().deselect();
+    }
+
+    fn copy(&mut self) -> Option<String> {
+        self.paragraph.raw_mut().copy()
+    }
 }
 
 /// The format of some [`Text`].
@@ -643,6 +480,36 @@ impl Default for Format {
             wrapping: Wrapping::default(),
             ellipsis: Ellipsis::default(),
         }
+    }
+}
+
+fn update<P: Paragraph + 'static>(
+    tree: &mut Tree,
+    event: &crate::Event,
+    layout: Layout,
+    cursor: mouse::Cursor,
+) {
+    match event {
+        Event::Mouse(mouse::Event::CursorMoved { .. })
+        | Event::Window(window::Event::RedrawRequested(_)) => {
+            let state = tree.state.downcast_mut::<State<P>>();
+
+            let Some(position) = cursor.position_in(layout.bounds()) else {
+                state.is_hovered = false;
+                return;
+            };
+
+            let anchor = Rectangle::with_size(layout.size()).anchor(
+                state.paragraph.min_bounds(),
+                state.paragraph.align_x(),
+                state.paragraph.align_y(),
+            );
+
+            let translation = anchor - Point::ORIGIN;
+
+            state.is_hovered = state.paragraph.raw().hit_glyph(position - translation);
+        }
+        _ => {}
     }
 }
 
@@ -689,6 +556,7 @@ pub fn draw<Renderer>(
     bounds: Rectangle,
     paragraph: &Renderer::Paragraph,
     appearance: Style,
+    selection_color: Color,
     viewport: &Rectangle,
 ) where
     Renderer: text::Renderer,
@@ -705,15 +573,21 @@ pub fn draw<Renderer>(
         appearance.color.unwrap_or(style.text_color),
         *viewport,
     );
-}
 
-impl<'a, Message, Theme, Renderer> From<Text<'a, Theme>> for Element<'a, Message, Theme, Renderer>
-where
-    Theme: Catalog + 'a,
-    Renderer: text::Renderer + 'a,
-{
-    fn from(text: Text<'a, Theme>) -> Element<'a, Message, Theme, Renderer> {
-        Element::new(text)
+    let selection = paragraph.selection();
+
+    if !selection.is_empty() {
+        let translation = anchor - Point::ORIGIN;
+
+        for region in selection {
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: *region + translation,
+                    ..renderer::Quad::default()
+                },
+                appearance.selection.unwrap_or(selection_color),
+            );
+        }
     }
 }
 
@@ -726,16 +600,6 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> From<&'a str> for Element<'a, Message, Theme, Renderer>
-where
-    Theme: Catalog + 'a,
-    Renderer: text::Renderer + 'a,
-{
-    fn from(content: &'a str) -> Self {
-        Text::from(content).into()
-    }
-}
-
 /// The appearance of some text.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Style {
@@ -743,8 +607,11 @@ pub struct Style {
     ///
     /// The default, `None`, means using the inherited color.
     pub color: Option<Color>,
-    /// The [`Color`] used to highlight selected text.
-    pub selection: Color,
+
+    /// The [`Color`] of the selection, if any.
+    ///
+    /// The default, `None`, means using the global selection color.
+    pub selection: Option<Color>,
 }
 
 /// The theme catalog of a [`Text`].
@@ -757,6 +624,9 @@ pub trait Catalog: Sized {
 
     /// The [`Style`] of a class with the given status.
     fn style(&self, item: &Self::Class<'_>) -> Style;
+
+    /// The global selection [`Color`].
+    fn selection(&self) -> Color;
 }
 
 /// A styling function for a [`Text`].
@@ -768,7 +638,11 @@ impl Catalog for Theme {
     type Class<'a> = StyleFn<'a, Self>;
 
     fn default<'a>() -> Self::Class<'a> {
-        Box::new(default)
+        Box::new(|_theme| Style::default())
+    }
+
+    fn selection(&self) -> Color {
+        self.palette().background.strongest.color
     }
 
     fn style(&self, class: &Self::Class<'_>) -> Style {
@@ -777,10 +651,10 @@ impl Catalog for Theme {
 }
 
 /// The default text styling; color is inherited.
-pub fn default(theme: &Theme) -> Style {
+pub fn default(_theme: &Theme) -> Style {
     Style {
         color: None,
-        selection: theme.palette().primary.weak.color,
+        selection: None,
     }
 }
 
@@ -788,7 +662,7 @@ pub fn default(theme: &Theme) -> Style {
 pub fn base(theme: &Theme) -> Style {
     Style {
         color: Some(theme.seed().text),
-        selection: theme.palette().primary.weak.color,
+        selection: None,
     }
 }
 
@@ -796,7 +670,7 @@ pub fn base(theme: &Theme) -> Style {
 pub fn primary(theme: &Theme) -> Style {
     Style {
         color: Some(theme.seed().primary),
-        selection: theme.palette().primary.weak.color,
+        selection: None,
     }
 }
 
@@ -804,7 +678,7 @@ pub fn primary(theme: &Theme) -> Style {
 pub fn secondary(theme: &Theme) -> Style {
     Style {
         color: Some(theme.palette().secondary.base.color),
-        selection: theme.palette().primary.weak.color,
+        selection: None,
     }
 }
 
@@ -812,7 +686,7 @@ pub fn secondary(theme: &Theme) -> Style {
 pub fn success(theme: &Theme) -> Style {
     Style {
         color: Some(theme.seed().success),
-        selection: theme.palette().primary.weak.color,
+        selection: None,
     }
 }
 
@@ -820,7 +694,7 @@ pub fn success(theme: &Theme) -> Style {
 pub fn warning(theme: &Theme) -> Style {
     Style {
         color: Some(theme.seed().warning),
-        selection: theme.palette().primary.weak.color,
+        selection: None,
     }
 }
 
@@ -828,6 +702,6 @@ pub fn warning(theme: &Theme) -> Style {
 pub fn danger(theme: &Theme) -> Style {
     Style {
         color: Some(theme.seed().danger),
-        selection: theme.palette().primary.weak.color,
+        selection: None,
     }
 }

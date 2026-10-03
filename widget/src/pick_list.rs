@@ -3,7 +3,7 @@
 //! # Example
 //! ```no_run
 //! # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::Renderer; pub use iced_widget::core::*; }
-//! # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
+//! # use iced::widget::Widget;
 //! #
 //! use iced::widget::pick_list;
 //!
@@ -24,7 +24,7 @@
 //!     FruitSelected(Fruit),
 //! }
 //!
-//! fn view(state: &State) -> Element<'_, Message> {
+//! fn view(state: &State) -> impl Widget<Message> {
 //!     let fruits = [
 //!         Fruit::Apple,
 //!         Fruit::Orange,
@@ -39,7 +39,6 @@
 //!     )
 //!     .on_select(Message::FruitSelected)
 //!     .placeholder("Select your favorite fruit...")
-//!     .into()
 //! }
 //!
 //! fn update(state: &mut State, message: Message) {
@@ -70,13 +69,14 @@ use crate::core::renderer;
 use crate::core::text::paragraph;
 use crate::core::text::{self, Text};
 use crate::core::touch;
+use crate::core::widget::Meta;
 use crate::core::widget::operation::{self, Operation};
 use crate::core::widget::tree::{self, Tree};
 use crate::core::widget::Id;
 use crate::core::window;
 use crate::core::{
-    Background, Border, Color, Element, Event, Font, Layout, Length, Padding, Pixels, Point,
-    Rectangle, Shell, Size, Theme, Vector, Widget,
+    Background, Border, Color, Event, Font, Layout, Length, Padding, Pixels, Point, Rectangle,
+    Shell, Size, Theme, Vector, Widget,
 };
 use crate::overlay::menu::{self, Menu};
 
@@ -88,7 +88,7 @@ use std::f32;
 /// # Example
 /// ```no_run
 /// # mod iced { pub mod widget { pub use iced_widget::*; } pub use iced_widget::Renderer; pub use iced_widget::core::*; }
-/// # pub type Element<'a, Message> = iced_widget::core::Element<'a, Message, iced_widget::Theme, iced_widget::Renderer>;
+/// # use iced::widget::Widget;
 /// #
 /// use iced::widget::pick_list;
 ///
@@ -109,7 +109,7 @@ use std::f32;
 ///     FruitSelected(Fruit),
 /// }
 ///
-/// fn view(state: &State) -> Element<'_, Message> {
+/// fn view(state: &State) -> impl Widget<Message> {
 ///     let fruits = [
 ///         Fruit::Apple,
 ///         Fruit::Orange,
@@ -124,7 +124,6 @@ use std::f32;
 ///     )
 ///     .on_select(Message::FruitSelected)
 ///     .placeholder("Select your favorite fruit...")
-///     .into()
 /// }
 ///
 /// fn update(state: &mut State, message: Message) {
@@ -334,6 +333,15 @@ where
         self.menu_class = class.into();
         self
     }
+}
+
+impl<'a, T, L, V, Message, Theme> Meta for PickList<'a, T, L, V, Message, Theme>
+where
+    T: PartialEq + Clone,
+    L: Borrow<[T]> + 'a,
+    V: Borrow<T> + 'a,
+    Theme: Catalog,
+{
 }
 
 impl<'a, T, L, V, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
@@ -845,8 +853,8 @@ where
         let selected = self.selected.as_ref().map(Borrow::borrow);
         let label = selected.map(&self.to_string);
 
-        if let Some(label) = label.or_else(|| self.placeholder.clone()) {
-            operation.text(None, layout.bounds(), &label);
+        if let Some(mut label) = label.or_else(|| self.placeholder.clone()) {
+            operation.text(None, layout.bounds(), &mut label);
         }
     }
 
@@ -898,21 +906,6 @@ where
         } else {
             Vec::new()
         }
-    }
-}
-
-impl<'a, T, L, V, Message, Theme, Renderer> From<PickList<'a, T, L, V, Message, Theme>>
-    for Element<'a, Message, Theme, Renderer>
-where
-    T: Clone + PartialEq + 'a,
-    L: Borrow<[T]> + 'a,
-    V: Borrow<T> + 'a,
-    Message: Clone + 'a,
-    Theme: Catalog + 'a,
-    Renderer: text::Renderer + 'a,
-{
-    fn from(pick_list: PickList<'a, T, L, V, Message, Theme>) -> Self {
-        Self::new(pick_list)
     }
 }
 

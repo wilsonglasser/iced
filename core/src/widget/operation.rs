@@ -1,12 +1,12 @@
 //! Query or update internal widget state.
 pub mod focusable;
 pub mod scrollable;
-pub mod selectable;
+pub mod text;
 pub mod text_input;
 
 pub use focusable::Focusable;
 pub use scrollable::Scrollable;
-pub use selectable::Selectable;
+pub use text::Text;
 pub use text_input::TextInput;
 
 use crate::widget::Id;
@@ -47,11 +47,8 @@ pub trait Operation<T = ()>: Send {
     /// Operates on a widget that has text input.
     fn text_input(&mut self, _id: Option<&Id>, _bounds: Rectangle, _state: &mut dyn TextInput) {}
 
-    /// Operates on a widget that owns a text selection.
-    fn selectable(&mut self, _id: Option<&Id>, _bounds: Rectangle, _state: &mut dyn Selectable) {}
-
     /// Operates on a widget that contains some text.
-    fn text(&mut self, _id: Option<&Id>, _bounds: Rectangle, _text: &str) {}
+    fn text(&mut self, _id: Option<&Id>, _bounds: Rectangle, _state: &mut dyn Text) {}
 
     /// Operates on a custom widget with some state.
     fn custom(&mut self, _id: Option<&Id>, _bounds: Rectangle, _state: &mut dyn Any) {}
@@ -94,11 +91,7 @@ where
         self.as_mut().text_input(id, bounds, state);
     }
 
-    fn selectable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Selectable) {
-        self.as_mut().selectable(id, bounds, state);
-    }
-
-    fn text(&mut self, id: Option<&Id>, bounds: Rectangle, text: &str) {
+    fn text(&mut self, id: Option<&Id>, bounds: Rectangle, text: &mut dyn Text) {
         self.as_mut().text(id, bounds, text);
     }
 
@@ -198,11 +191,7 @@ where
             self.operation.text_input(id, bounds, state);
         }
 
-        fn selectable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Selectable) {
-            self.operation.selectable(id, bounds, state);
-        }
-
-        fn text(&mut self, id: Option<&Id>, bounds: Rectangle, text: &str) {
+        fn text(&mut self, id: Option<&Id>, bounds: Rectangle, text: &mut dyn Text) {
             self.operation.text(id, bounds, text);
         }
 
@@ -286,16 +275,7 @@ where
                     self.operation.text_input(id, bounds, state);
                 }
 
-                fn selectable(
-                    &mut self,
-                    id: Option<&Id>,
-                    bounds: Rectangle,
-                    state: &mut dyn Selectable,
-                ) {
-                    self.operation.selectable(id, bounds, state);
-                }
-
-                fn text(&mut self, id: Option<&Id>, bounds: Rectangle, text: &str) {
+                fn text(&mut self, id: Option<&Id>, bounds: Rectangle, text: &mut dyn Text) {
                     self.operation.text(id, bounds, text);
                 }
 
@@ -333,11 +313,7 @@ where
             self.operation.text_input(id, bounds, state);
         }
 
-        fn selectable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Selectable) {
-            self.operation.selectable(id, bounds, state);
-        }
-
-        fn text(&mut self, id: Option<&Id>, bounds: Rectangle, text: &str) {
+        fn text(&mut self, id: Option<&Id>, bounds: Rectangle, text: &mut dyn Text) {
             self.operation.text(id, bounds, text);
         }
 
@@ -416,11 +392,7 @@ where
             self.operation.text_input(id, bounds, state);
         }
 
-        fn selectable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Selectable) {
-            self.operation.selectable(id, bounds, state);
-        }
-
-        fn text(&mut self, id: Option<&Id>, bounds: Rectangle, text: &str) {
+        fn text(&mut self, id: Option<&Id>, bounds: Rectangle, text: &mut dyn Text) {
             self.operation.text(id, bounds, text);
         }
 
