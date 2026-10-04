@@ -259,7 +259,12 @@ where
                 }
                 winit::event::WindowEvent::DataTransferReceived { serial, value, .. } => {
                     if let Some((_, dropped)) = self.drags.remove(serial) {
-                        let paths = value.try_as_file_paths().unwrap_or_default();
+                        let paths: Vec<_> = value
+                            .try_as_uris()
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|uri| file_uri_to_path(uri))
+                            .collect();
 
                         if !paths.is_empty() {
                             self.process_event(
@@ -2125,4 +2130,17 @@ fn run_clipboard<Message: Send>(
             });
         });
     }
+}
+
+/// The local path a dropped `file:` URI names. Anything else (an `https:`
+/// link dragged from a browser, a URI that does not parse) is not a file
+/// and is left out.
+#[cfg(any(unix, windows, target_os = "redox", target_os = "wasi", target_os = "hermit"))]
+fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
+    url::Url::parse(uri).ok()?.to_file_path().ok()
+}
+
+#[cfg(not(any(unix, windows, target_os = "redox", target_os = "wasi", target_os = "hermit")))]
+fn file_uri_to_path(_uri: &str) -> Option<std::path::PathBuf> {
+    None
 }

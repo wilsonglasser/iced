@@ -1263,7 +1263,7 @@ dependencies = [
 [[package]]
 name = "dpi"
 version = "0.1.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 
 [[package]]
 name = "dtor"
@@ -2366,6 +2366,7 @@ dependencies = [
  "sysinfo",
  "thiserror 2.0.20",
  "tracing",
+ "url",
  "wasm-bindgen-futures",
  "web-sys",
  "winit",
@@ -5316,7 +5317,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -6879,8 +6880,8 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winit"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "bitflags 2.13.1",
  "cfg_aliases",
@@ -6905,8 +6906,8 @@ dependencies = [
 
 [[package]]
 name = "winit-android"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "android-activity",
  "bitflags 2.13.1",
@@ -6920,8 +6921,8 @@ dependencies = [
 
 [[package]]
 name = "winit-appkit"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "bitflags 2.13.1",
  "block2",
@@ -6942,8 +6943,8 @@ dependencies = [
 
 [[package]]
 name = "winit-common"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "block2",
  "dpi",
@@ -6960,8 +6961,8 @@ dependencies = [
 
 [[package]]
 name = "winit-core"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "bitflags 2.13.1",
  "cursor-icon",
@@ -6969,14 +6970,13 @@ dependencies = [
  "keyboard-types",
  "raw-window-handle",
  "smol_str",
- "url",
  "web-time",
 ]
 
 [[package]]
 name = "winit-orbital"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "bitflags 2.13.1",
  "dpi",
@@ -6991,8 +6991,8 @@ dependencies = [
 
 [[package]]
 name = "winit-uikit"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "bitflags 2.13.1",
  "block2",
@@ -7011,8 +7011,8 @@ dependencies = [
 
 [[package]]
 name = "winit-wayland"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "bitflags 2.13.1",
  "calloop",
@@ -7038,8 +7038,8 @@ dependencies = [
 
 [[package]]
 name = "winit-web"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "atomic-waker",
  "bitflags 2.13.1",
@@ -7060,17 +7060,17 @@ dependencies = [
 
 [[package]]
 name = "winit-win32"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "bitflags 2.13.1",
  "cursor-icon",
  "dpi",
+ "percent-encoding",
  "raw-window-handle",
  "smol_str",
  "tracing",
  "unicode-segmentation",
- "url",
  "windows-sys 0.61.2",
  "winit-common",
  "winit-core",
@@ -7078,8 +7078,8 @@ dependencies = [
 
 [[package]]
 name = "winit-x11"
-version = "0.31.0-beta.2"
-source = "git+https://github.com/wilsonglasser/winit#4699e33d24e979715517179d024db8768428de8a"
+version = "0.31.0-beta.3"
+source = "git+https://github.com/wilsonglasser/winit#a18033db4c652f07c4b7d018ee71945ffeb1f8fd"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
