@@ -43,9 +43,46 @@ pub struct Emulator<P: Program> {
     window: core::window::Id,
     cursor: mouse::Cursor,
     cache: Option<user_interface::Cache>,
+    /// Where the focused window sits on the emulated screen.
+    position: Point,
+    /// The other open windows, least recently focused first. The fields
+    /// above are the FOCUSED window's; these are parked here until they
+    /// are focused, or until the mouse they captured moves again.
+    others: Vec<Parked>,
+    /// Every open window, in the order it was opened.
+    opened: Vec<core::window::Id>,
+    /// The window a held mouse button was pressed in. The operating
+    /// system keeps delivering the pointer to it until the release,
+    /// whichever window is focused or under the cursor, and so does the
+    /// [`Emulator`].
+    capture: Option<core::window::Id>,
     pending_tasks: usize,
     clipboard: Option<core::clipboard::Content>,
     clipboard_primary: Option<core::clipboard::Content>,
+}
+
+/// A window of the [`Emulator`] that is not the focused one.
+struct Parked {
+    id: core::window::Id,
+    size: Size,
+    position: Point,
+    cursor: mouse::Cursor,
+    cache: user_interface::Cache,
+}
+
+/// An open window of an [`Emulator`], as listed by
+/// [`Emulator::windows`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowInfo {
+    /// The window.
+    pub id: core::window::Id,
+    /// Its position on the emulated screen.
+    pub position: Point,
+    /// Its size.
+    pub size: Size,
+    /// Whether it is the focused one: the window that is drawn and
+    /// that receives the instructions.
+    pub focused: bool,
 }
 
 /// An emulation event.
@@ -126,6 +163,10 @@ impl<P: Program + 'static> Emulator<P> {
             cursor: mouse::Cursor::Unavailable,
             window: core::window::Id::unique(),
             cache: Some(user_interface::Cache::default()),
+            position: Point::ORIGIN,
+            others: Vec::new(),
+            opened: Vec::new(),
+            capture: None,
             pending_tasks: 0,
             clipboard: None,
             clipboard_primary: None,
@@ -234,30 +275,109 @@ impl<P: Program + 'static> Emulator<P> {
                     use crate::runtime::window;
 
                     match action {
-                        window::Action::Open(id, _settings, sender) => {
-                            self.window = id;
+                        window::Action::Open(id, settings, sender) => {
+                            let position = match settings.position {
+                                core::window::Position::Specific(position) => Some(position),
+                                _ => None,
+                            };
 
-                            let _ = sender.send(self.window);
+                            if self.opened.is_empty() {
+                                // The first window is the one the
+                                // emulator was created with.
+                                self.window = id;
+                                self.position = position.unwrap_or(Point::ORIGIN);
+                                self.opened.push(id);
+                            } else {
+                                // A later one opens over the others and
+                                // takes the focus, like on a desktop.
+                                // Cascaded when the program did not say
+                                // where.
+                                let cascade = 32.0 * self.opened.len() as f32;
+                                let old = self.park_focused();
+
+                                self.window = id;
+                                self.position =
+                                    position.unwrap_or(Point::new(cascade, cascade));
+                                self.cursor = mouse::Cursor::Unavailable;
+                                self.cache = Some(user_interface::Cache::default());
+                                self.opened.push(id);
+
+                                self.window_event(old, core::window::Event::Unfocused);
+                                self.window_event(
+                                    id,
+                                    core::window::Event::Opened {
+                                        position: Some(self.position),
+                                        size: self.size,
+                                        scale_factor: 1.0,
+                                    },
+                                );
+                                self.window_event(id, core::window::Event::Focused);
+                            }
+
+                            let _ = sender.send(id);
                         }
-                        window::Action::GetOldest(sender) | window::Action::GetLatest(sender) => {
-                            let _ = sender.send(Some(self.window));
+                        window::Action::Close(id) => {
+                            self.opened.retain(|open| *open != id);
+
+                            if self.capture == Some(id) {
+                                self.capture = None;
+                            }
+
+                            if id == self.window {
+                                // The focus goes back to the window that
+                                // had it before. With none left the
+                                // emulator keeps drawing under the id of
+                                // the closed one.
+                                if let Some(previous) = self.others.pop() {
+                                    self.unpark(previous);
+                                    self.window_event(id, core::window::Event::Closed);
+                                    self.window_event(self.window, core::window::Event::Focused);
+                                }
+                            } else if let Some(index) =
+                                self.others.iter().position(|parked| parked.id == id)
+                            {
+                                let _ = self.others.remove(index);
+                                self.window_event(id, core::window::Event::Closed);
+                            }
                         }
-                        window::Action::GetSize(id, sender) if id == self.window => {
-                            let _ = sender.send(self.size);
+                        window::Action::GainFocus(id) => {
+                            let _ = self.focus(id);
                         }
-                        window::Action::GetMaximized(id, sender) if id == self.window => {
+                        window::Action::Move(id, position) => {
+                            if self.set_position(id, position) {
+                                self.window_event(id, core::window::Event::Moved(position));
+                            }
+                        }
+                        window::Action::GetOldest(sender) => {
+                            let _ = sender.send(Some(
+                                self.opened.first().copied().unwrap_or(self.window),
+                            ));
+                        }
+                        window::Action::GetLatest(sender) => {
+                            let _ = sender.send(Some(
+                                self.opened.last().copied().unwrap_or(self.window),
+                            ));
+                        }
+                        window::Action::GetSize(id, sender) => {
+                            if let Some(info) = self.window_info(id) {
+                                let _ = sender.send(info.size);
+                            }
+                        }
+                        window::Action::GetPosition(id, sender) => {
+                            if let Some(info) = self.window_info(id) {
+                                let _ = sender.send(Some(info.position));
+                            }
+                        }
+                        window::Action::GetMaximized(id, sender) if self.is_open(id) => {
                             let _ = sender.send(false);
                         }
-                        window::Action::GetMinimized(id, sender) if id == self.window => {
+                        window::Action::GetMinimized(id, sender) if self.is_open(id) => {
                             let _ = sender.send(None);
                         }
-                        window::Action::GetPosition(id, sender) if id == self.window => {
-                            let _ = sender.send(Some(Point::ORIGIN));
-                        }
-                        window::Action::GetScaleFactor(id, sender) if id == self.window => {
+                        window::Action::GetScaleFactor(id, sender) if self.is_open(id) => {
                             let _ = sender.send(1.0);
                         }
-                        window::Action::GetMode(id, sender) if id == self.window => {
+                        window::Action::GetMode(id, sender) if self.is_open(id) => {
                             let _ = sender.send(core::window::Mode::Windowed);
                         }
                         _ => {
@@ -331,6 +451,37 @@ impl<P: Program + 'static> Emulator<P> {
     ///
     /// Otherwise, an [`Event::Failed`] will be triggered.
     pub fn run(&mut self, program: &P, instruction: &Instruction) {
+        use instruction::{Interaction, Mouse};
+
+        let mouse = match instruction {
+            Instruction::Interact(Interaction::Mouse(mouse)) => Some(mouse),
+            _ => None,
+        };
+
+        // A held button keeps the pointer with the window it was pressed
+        // in: its moves and its release are delivered there, in that
+        // window's coordinates, even after another window took the
+        // focus. That window is swapped in for the instruction, without
+        // any focus change.
+        let focused = self.window;
+        let captured = mouse
+            .and(self.capture)
+            .filter(|captured| *captured != focused && self.swap_to(*captured));
+
+        match mouse {
+            Some(Mouse::Press { .. }) => self.capture = Some(self.window),
+            Some(Mouse::Release { .. }) => self.capture = None,
+            _ => {}
+        }
+
+        self.run_focused(program, instruction);
+
+        if captured.is_some() {
+            let _ = self.swap_to(focused);
+        }
+    }
+
+    fn run_focused(&mut self, program: &P, instruction: &Instruction) {
         let mut user_interface = UserInterface::build(
             program.view(&self.state, self.window),
             self.size,
@@ -561,6 +712,148 @@ impl<P: Program + 'static> Emulator<P> {
                     Event::Action(Action(Action_::Runtime(runtime::Action::Output(message))))
                 })
             })));
+    }
+
+    /// Lists the open windows of the [`Emulator`], in the order they
+    /// were opened.
+    pub fn windows(&self) -> Vec<WindowInfo> {
+        if self.opened.is_empty() {
+            return vec![WindowInfo {
+                id: self.window,
+                position: self.position,
+                size: self.size,
+                focused: true,
+            }];
+        }
+
+        self.opened
+            .iter()
+            .filter_map(|id| self.window_info(*id))
+            .collect()
+    }
+
+    /// Focuses the given window: it becomes the one that is drawn and
+    /// that receives the instructions. The window that had the focus is
+    /// told it lost it, like on a desktop.
+    ///
+    /// Returns `false` if the window is not open.
+    pub fn focus(&mut self, id: core::window::Id) -> bool {
+        if id == self.window {
+            return true;
+        }
+
+        let old = self.window;
+
+        if !self.swap_to(id) {
+            return false;
+        }
+
+        self.window_event(old, core::window::Event::Unfocused);
+        self.window_event(id, core::window::Event::Focused);
+
+        true
+    }
+
+    /// Moves the given window on the emulated screen, as a user
+    /// dragging it would.
+    ///
+    /// Returns `false` if the window is not open.
+    pub fn place(&mut self, id: core::window::Id, position: Point) -> bool {
+        if !self.set_position(id, position) {
+            return false;
+        }
+
+        self.window_event(id, core::window::Event::Moved(position));
+
+        true
+    }
+
+    fn is_open(&self, id: core::window::Id) -> bool {
+        id == self.window || self.others.iter().any(|parked| parked.id == id)
+    }
+
+    fn window_info(&self, id: core::window::Id) -> Option<WindowInfo> {
+        if id == self.window {
+            return Some(WindowInfo {
+                id,
+                position: self.position,
+                size: self.size,
+                focused: true,
+            });
+        }
+
+        self.others
+            .iter()
+            .find(|parked| parked.id == id)
+            .map(|parked| WindowInfo {
+                id,
+                position: parked.position,
+                size: parked.size,
+                focused: false,
+            })
+    }
+
+    fn set_position(&mut self, id: core::window::Id, position: Point) -> bool {
+        if id == self.window {
+            self.position = position;
+            return true;
+        }
+
+        match self.others.iter_mut().find(|parked| parked.id == id) {
+            Some(parked) => {
+                parked.position = position;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Parks the focused window among the others and returns its id.
+    /// The focused fields are left for the caller to fill.
+    fn park_focused(&mut self) -> core::window::Id {
+        let id = self.window;
+
+        self.others.push(Parked {
+            id,
+            size: self.size,
+            position: self.position,
+            cursor: self.cursor,
+            cache: self.cache.take().unwrap_or_default(),
+        });
+
+        id
+    }
+
+    fn unpark(&mut self, parked: Parked) {
+        self.window = parked.id;
+        self.size = parked.size;
+        self.position = parked.position;
+        self.cursor = parked.cursor;
+        self.cache = Some(parked.cache);
+    }
+
+    /// Makes the given window the one in the focused fields, parking
+    /// the one that was there. No event is produced.
+    fn swap_to(&mut self, id: core::window::Id) -> bool {
+        let Some(index) = self.others.iter().position(|parked| parked.id == id) else {
+            return false;
+        };
+
+        let parked = self.others.remove(index);
+        let _ = self.park_focused();
+        self.unpark(parked);
+
+        true
+    }
+
+    /// Tells the running subscriptions about a window event, the way
+    /// the shell does.
+    fn window_event(&mut self, window: core::window::Id, event: core::window::Event) {
+        self.runtime.broadcast(subscription::Event::Interaction {
+            window,
+            event: core::Event::Window(event),
+            status: core::event::Status::Ignored,
+        });
     }
 
     /// Returns the current view of the [`Emulator`].
