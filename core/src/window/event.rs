@@ -76,4 +76,29 @@ pub enum Event {
     ///
     /// - **Wayland:** Not implemented.
     FilesHoveredLeft,
+
+    /// A window that is being carried by a drag (see `window::drag_toplevel`
+    /// in the runtime) is over this window, at the given position.
+    ///
+    /// The carried window takes no part in the drag: it is the windows
+    /// under it that are told where the cursor is, so that one of them can
+    /// offer itself as the place to drop.
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Wayland only.**
+    ToplevelDragMoved {
+        /// The position of the cursor in this window, in logical pixels.
+        position: Point,
+    },
+
+    /// The carried window left this window without being dropped on it.
+    ToplevelDragLeft,
+
+    /// The carried window was dropped on this window.
+    ToplevelDragDropped,
+
+    /// The drag that was carrying a window ended. Delivered to the window
+    /// the drag started from, whether or not it was dropped on a window.
+    ToplevelDragEnded,
 }

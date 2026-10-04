@@ -161,6 +161,9 @@ where
         >,
         /// Shared with `run`, because `winit 0.31` takes the handler BY VALUE, so there is no
         /// runner left to read a field off of once the loop returns.
+        /// The window a toplevel drag was started from (see [`Control::DragToplevel`]), while
+        /// it lasts. Any drag our windows see meanwhile is that one: there is one pointer.
+        carrying: Option<winit::window::WindowId>,
         error: Rc<RefCell<Option<Error>>>,
         system_theme: Option<oneshot::Sender<theme::Mode>>,
 
@@ -178,6 +181,7 @@ where
         receiver: control_receiver,
         actions,
         drags: FxHashMap::default(),
+        carrying: None,
         error: error.clone(),
         system_theme: Some(system_theme_sender),
 
@@ -219,6 +223,46 @@ where
             // A drag only announces itself in `winit 0.31`; the paths have to be asked for, and
             // they come back in a later `DataTransferReceived`. Both halves need the event loop,
             // which `run_instance` does not have, so the round trip is closed here.
+            // A window being carried by a drag: the drag carries no files, so none of the
+            // file path below applies. The windows it passes over are told where the cursor
+            // is, and the window it started from is told when it is over.
+            if self.carrying.is_some() {
+                let carried = match &event {
+                    winit::event::WindowEvent::DragEntered { id, position } => {
+                        // Without this the compositor never sends the drop.
+                        let _ = event_loop
+                            .set_valid_dnd_actions(*id, &[winit::event_loop::DndAction::Copy]);
+
+                        Some(position.map(Carried::Moved))
+                    }
+                    winit::event::WindowEvent::DragPosition { position, .. } => {
+                        Some(Some(Carried::Moved(*position)))
+                    }
+                    winit::event::WindowEvent::DragLeft { .. } => Some(Some(Carried::Left)),
+                    winit::event::WindowEvent::DragDropped { .. } => {
+                        Some(Some(Carried::Dropped))
+                    }
+                    winit::event::WindowEvent::OutgoingDragDropped { .. }
+                    | winit::event::WindowEvent::OutgoingDragCanceled { .. } => {
+                        self.carrying = None;
+
+                        Some(Some(Carried::Ended))
+                    }
+                    _ => None,
+                };
+
+                if let Some(carried) = carried {
+                    if let Some(carried) = carried {
+                        self.process_event(
+                            event_loop,
+                            Event::EventLoopAwakened(Awakening::Carried { window_id, carried }),
+                        );
+                    }
+
+                    return;
+                }
+            }
+
             match &event {
                 winit::event::WindowEvent::DragEntered { id, .. } => {
                     // A drag only becomes a drop when the target declares
@@ -480,6 +524,40 @@ where
                                 *self.error.borrow_mut() = Some(error);
                                 event_loop.exit();
                             }
+                            Control::DragToplevel {
+                                holder,
+                                toplevel,
+                                offset,
+                                on_result,
+                            } => {
+                                #[cfg(all(target_os = "linux", feature = "wayland"))]
+                                let started = {
+                                    use winit::platform::wayland::ActiveEventLoopExtWayland;
+
+                                    event_loop.supports_toplevel_drag()
+                                        && event_loop
+                                            .start_toplevel_drag(
+                                                holder,
+                                                toplevel,
+                                                offset,
+                                                "application/x-iced-toplevel-drag",
+                                            )
+                                            .is_ok()
+                                };
+
+                                #[cfg(not(all(target_os = "linux", feature = "wayland")))]
+                                let started = {
+                                    let _ = (toplevel, offset);
+
+                                    false
+                                };
+
+                                if started {
+                                    self.carrying = Some(holder);
+                                }
+
+                                let _ = on_result.send(started);
+                            }
                             Control::SetAutomaticWindowTabbing(_enabled) => {
                                 #[cfg(target_os = "macos")]
                                 {
@@ -544,6 +622,11 @@ enum Awakening<Message: 'static> {
     },
     /// One action drained from the [`Proxy`] queue after a wake-up.
     Action(Message),
+    /// A window carried by a drag touched one of ours (see [`Carried`]).
+    Carried {
+        window_id: winit::window::WindowId,
+        carried: Carried,
+    },
     /// The paths behind a drag, once they finally arrived.
     ///
     /// `winit 0.31` no longer puts them in the event: the drag only carries a `DataTransferId`,
@@ -573,6 +656,23 @@ enum Control {
         scale_factor: f32,
     },
     SetAutomaticWindowTabbing(bool),
+    /// Start a drag from `holder` that carries `toplevel` (see `window::drag_toplevel`).
+    DragToplevel {
+        holder: winit::window::WindowId,
+        toplevel: winit::window::WindowId,
+        offset: (i32, i32),
+        on_result: oneshot::Sender<bool>,
+    },
+}
+
+/// What happened to a window carried by a drag, from the point of view of the window the event
+/// was delivered to.
+#[derive(Debug, Clone, Copy)]
+enum Carried {
+    Moved(winit::dpi::PhysicalPosition<f64>),
+    Left,
+    Dropped,
+    Ended,
 }
 
 async fn run_instance<P>(
@@ -823,6 +923,32 @@ async fn run_instance<P>(
                                 subscription::MacOS::ReceivedUrl(url),
                             ),
                         ));
+                    }
+                    Awakening::Carried { window_id, carried } => {
+                        let Some((id, window)) = window_manager.get_mut_alias(window_id) else {
+                            continue;
+                        };
+
+                        let event = match carried {
+                            Carried::Moved(position) => {
+                                let position = position.to_logical::<f64>(
+                                    f64::from(window.state.scale_factor()),
+                                );
+
+                                window::Event::ToplevelDragMoved {
+                                    position: core::Point::new(
+                                        position.x as f32,
+                                        position.y as f32,
+                                    ),
+                                }
+                            }
+                            Carried::Left => window::Event::ToplevelDragLeft,
+                            Carried::Dropped => window::Event::ToplevelDragDropped,
+                            Carried::Ended => window::Event::ToplevelDragEnded,
+                        };
+
+                        events.push((id, core::Event::Window(event)));
+                        window.raw.request_redraw();
                     }
                     Awakening::Files {
                         window_id,
@@ -1686,6 +1812,26 @@ fn run_action<'a, P, C>(
             window::Action::GainFocus(id) => {
                 if let Some(window) = window_manager.get_mut(id) {
                     window.raw.focus_window();
+                }
+            }
+            window::Action::DragToplevel(holder, toplevel, offset, channel) => {
+                let holder = window_manager.get_mut(holder).map(|window| window.raw.id());
+                let toplevel = window_manager.get_mut(toplevel).map(|window| window.raw.id());
+
+                match (holder, toplevel) {
+                    (Some(holder), Some(toplevel)) => {
+                        control_sender
+                            .start_send(Control::DragToplevel {
+                                holder,
+                                toplevel,
+                                offset: (offset.x.round() as i32, offset.y.round() as i32),
+                                on_result: channel,
+                            })
+                            .expect("Send control action");
+                    }
+                    _ => {
+                        let _ = channel.send(false);
+                    }
                 }
             }
             window::Action::SetLevel(id, level) => {

@@ -343,6 +343,11 @@ impl<P: Program + 'static> Emulator<P> {
                         window::Action::GainFocus(id) => {
                             let _ = self.focus(id);
                         }
+                        window::Action::DragToplevel(_, _, _, sender) => {
+                            // The emulated desktop has positions, so a
+                            // program carries its windows itself.
+                            let _ = sender.send(false);
+                        }
                         window::Action::Move(id, position) => {
                             if self.set_position(id, position) {
                                 self.window_event(id, core::window::Event::Moved(position));

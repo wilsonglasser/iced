@@ -112,6 +112,19 @@ pub enum Action {
     /// - **Web / Wayland:** Unsupported.
     GainFocus(Id),
 
+    /// Start a drag from the first window that carries the second one with
+    /// it: the windowing system moves the carried window with the cursor
+    /// until the button comes up.
+    ///
+    /// The offset is where the carried window sits relative to the cursor.
+    /// The sender is told whether the drag started.
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **Wayland:** Needs the `xdg-toplevel-drag` protocol.
+    /// - **Everything else:** Unsupported.
+    DragToplevel(Id, Id, Point, oneshot::Sender<bool>),
+
     /// Change the window [`Level`].
     SetLevel(Id, Level),
 
@@ -407,6 +420,26 @@ pub fn request_user_attention<T>(id: Id, user_attention: Option<UserAttention>) 
 /// user experience.
 pub fn gain_focus<T>(id: Id) -> Task<T> {
     task::effect(crate::Action::Window(Action::GainFocus(id)))
+}
+
+/// Starts a drag from `holder`, the window a pointer button is held in,
+/// that carries the window `toplevel` with it: the windowing system moves
+/// that window with the cursor until the button comes up, and leaves it out
+/// of the choice of a drop target.
+///
+/// The windows it passes over receive [`Event::ToplevelDragMoved`], the one
+/// it is dropped on [`Event::ToplevelDragDropped`], and `holder` receives
+/// [`Event::ToplevelDragEnded`] when it is over. This is how a tab dragged
+/// out of a window can become a window of its own while it is still being
+/// dragged, and be dropped onto another window.
+///
+/// `offset` is where `toplevel` sits relative to the cursor. The [`Task`]
+/// produces whether the drag started: only Wayland compositors with the
+/// `xdg-toplevel-drag` protocol can, and everywhere else it is `false`.
+pub fn drag_toplevel(holder: Id, toplevel: Id, offset: Point) -> Task<bool> {
+    task::oneshot(move |channel| {
+        crate::Action::Window(Action::DragToplevel(holder, toplevel, offset, channel))
+    })
 }
 
 /// Changes the window [`Level`].
