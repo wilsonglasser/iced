@@ -226,28 +226,11 @@ impl<P: Program + 'static> Emulator<P> {
                     self.update(program, message);
                 }
                 runtime::Action::Widget(operation) => {
-                    let mut user_interface = UserInterface::build(
-                        program.view(&self.state, self.window),
-                        self.size,
-                        self.cache.take().unwrap(),
-                        &mut self.renderer,
-                    );
-
-                    let mut operation = Some(operation);
-
-                    while let Some(mut current) = operation.take() {
-                        user_interface.operate(&self.renderer, &mut current);
-
-                        match current.finish() {
-                            widget::operation::Outcome::None => {}
-                            widget::operation::Outcome::Some(()) => {}
-                            widget::operation::Outcome::Chain(next) => {
-                                operation = Some(next);
-                            }
-                        }
-                    }
-
-                    self.cache = Some(user_interface.into_cache());
+                    // Every window, like the windowed runner.
+                    self.run_operation(program, None, operation);
+                }
+                runtime::Action::WindowWidget(window, operation) => {
+                    self.run_operation(program, Some(window), operation);
                 }
                 runtime::Action::Clipboard(action) => {
                     use crate::runtime::clipboard;
@@ -827,6 +810,53 @@ impl<P: Program + 'static> Emulator<P> {
         });
 
         id
+    }
+
+    /// Runs a widget operation in `target`, or in every window when it
+    /// is `None`: the focused one through its fields, a parked one
+    /// through its own cache.
+    fn run_operation(
+        &mut self,
+        program: &P,
+        target: Option<core::window::Id>,
+        operation: Box<dyn widget::Operation>,
+    ) {
+        let mut operation = Some(operation);
+
+        while let Some(mut current) = operation.take() {
+            if target.is_none_or(|id| id == self.window) {
+                let mut user_interface = UserInterface::build(
+                    program.view(&self.state, self.window),
+                    self.size,
+                    self.cache.take().unwrap(),
+                    &mut self.renderer,
+                );
+                user_interface.operate(&self.renderer, &mut current);
+                self.cache = Some(user_interface.into_cache());
+            }
+
+            for parked in &mut self.others {
+                if target.is_some_and(|id| id != parked.id) {
+                    continue;
+                }
+                let mut user_interface = UserInterface::build(
+                    program.view(&self.state, parked.id),
+                    parked.size,
+                    std::mem::take(&mut parked.cache),
+                    &mut self.renderer,
+                );
+                user_interface.operate(&self.renderer, &mut current);
+                parked.cache = user_interface.into_cache();
+            }
+
+            match current.finish() {
+                widget::operation::Outcome::None => {}
+                widget::operation::Outcome::Some(()) => {}
+                widget::operation::Outcome::Chain(next) => {
+                    operation = Some(next);
+                }
+            }
+        }
     }
 
     fn unpark(&mut self, parked: Parked) {

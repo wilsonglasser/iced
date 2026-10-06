@@ -2056,6 +2056,29 @@ fn run_action<'a, P, C>(
                 window.raw.request_redraw();
             }
         }
+        Action::WindowWidget(id, operation) => {
+            let mut current_operation = Some(operation);
+
+            while let Some(mut operation) = current_operation.take() {
+                if let Some(ui) = interfaces.get_mut(&id)
+                    && let Some(window) = window_manager.get_mut(id)
+                {
+                    ui.operate(&window.renderer, operation.as_mut());
+                }
+
+                match operation.finish() {
+                    operation::Outcome::None => {}
+                    operation::Outcome::Some(()) => {}
+                    operation::Outcome::Chain(next) => {
+                        current_operation = Some(next);
+                    }
+                }
+            }
+
+            if let Some(window) = window_manager.get_mut(id) {
+                window.raw.request_redraw();
+            }
+        }
         Action::Image(action) => match action {
             image::Action::Allocate(handle, sender) => {
                 // TODO: Shared image cache in compositor

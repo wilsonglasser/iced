@@ -214,6 +214,15 @@ impl<T> Task<T> {
         self.then(|_| Task::none())
     }
 
+    /// Runs the widget operations of this [`Task`] in the window
+    /// `window` only. See [`in_window`].
+    pub fn in_window(self, window: crate::core::window::Id) -> Self
+    where
+        T: MaybeSend + 'static,
+    {
+        in_window(self, window)
+    }
+
     /// Creates a new [`Task`] that can be aborted with the returned [`Handle`].
     pub fn abortable(self) -> (Self, Handle)
     where
@@ -391,6 +400,28 @@ impl<T> Default for Task<T> {
 impl<T> From<()> for Task<T> {
     fn from(_value: ()) -> Self {
         Self::none()
+    }
+}
+
+/// Scopes every widget operation `task` runs to the window `window`.
+///
+/// Widget operations run in every window by default; the runtime of a
+/// program with several windows uses this to make an operation (a focus,
+/// a scroll) reach only the window it was asked for.
+pub fn in_window<T>(task: Task<T>, window: crate::core::window::Id) -> Task<T>
+where
+    T: MaybeSend + 'static,
+{
+    let Some(stream) = task.stream else {
+        return task;
+    };
+
+    Task {
+        stream: Some(boxed_stream(stream.map(move |action| match action {
+            Action::Widget(operation) => Action::WindowWidget(window, operation),
+            action => action,
+        }))),
+        units: task.units,
     }
 }
 
