@@ -934,7 +934,7 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 [[package]]
 name = "cosmic-text"
 version = "0.19.0"
-source = "git+https://github.com/hecrj/cosmic-text.git?rev=19cca2bd90e73e20614964f06d44240e71e503b3#19cca2bd90e73e20614964f06d44240e71e503b3"
+source = "git+https://github.com/hecrj/cosmic-text.git?rev=6adc2364289fd241daed751948a03d0aea5a31ca#6adc2364289fd241daed751948a03d0aea5a31ca"
 dependencies = [
  "bitflags 2.13.1",
  "fontdb",
@@ -1059,7 +1059,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 [[package]]
 name = "cryoglyph"
 version = "0.1.0"
-source = "git+https://github.com/iced-rs/cryoglyph.git?rev=e13618df29a5593968040c12ab086b7237249ded#e13618df29a5593968040c12ab086b7237249ded"
+source = "git+https://github.com/iced-rs/cryoglyph.git?rev=cf38ed5ea0cfe95270b31ced2910560a7fcc5003#cf38ed5ea0cfe95270b31ced2910560a7fcc5003"
 dependencies = [
  "cosmic-text",
  "etagere",
@@ -1263,7 +1263,7 @@ dependencies = [
 [[package]]
 name = "dpi"
 version = "0.1.2"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 
 [[package]]
 name = "dtor"
@@ -6881,7 +6881,7 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 [[package]]
 name = "winit"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "bitflags 2.13.1",
  "cfg_aliases",
@@ -6907,7 +6907,7 @@ dependencies = [
 [[package]]
 name = "winit-android"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "android-activity",
  "bitflags 2.13.1",
@@ -6922,7 +6922,7 @@ dependencies = [
 [[package]]
 name = "winit-appkit"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "bitflags 2.13.1",
  "block2",
@@ -6944,7 +6944,7 @@ dependencies = [
 [[package]]
 name = "winit-common"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "block2",
  "dpi",
@@ -6962,7 +6962,7 @@ dependencies = [
 [[package]]
 name = "winit-core"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "bitflags 2.13.1",
  "cursor-icon",
@@ -6976,7 +6976,7 @@ dependencies = [
 [[package]]
 name = "winit-orbital"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "bitflags 2.13.1",
  "dpi",
@@ -6992,7 +6992,7 @@ dependencies = [
 [[package]]
 name = "winit-uikit"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "bitflags 2.13.1",
  "block2",
@@ -7012,7 +7012,7 @@ dependencies = [
 [[package]]
 name = "winit-wayland"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "bitflags 2.13.1",
  "calloop",
@@ -7039,7 +7039,7 @@ dependencies = [
 [[package]]
 name = "winit-web"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "atomic-waker",
  "bitflags 2.13.1",
@@ -7061,7 +7061,7 @@ dependencies = [
 [[package]]
 name = "winit-win32"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "bitflags 2.13.1",
  "cursor-icon",
@@ -7079,7 +7079,7 @@ dependencies = [
 [[package]]
 name = "winit-x11"
 version = "0.31.0-beta.3"
-source = "git+https://github.com/wilsonglasser/winit#d23f972a31a383be7a585928c212852d6c4ea064"
+source = "git+https://github.com/wilsonglasser/winit#9410f9e5748be9bdf0829acac5c4117c6c720dc4"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
