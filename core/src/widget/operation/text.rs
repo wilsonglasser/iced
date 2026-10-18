@@ -170,11 +170,66 @@ pub fn copy() -> impl Operation<String> {
         }
 
         fn finish(&self) -> Outcome<String> {
-            Outcome::Some(self.text.clone())
+            if self.text.is_empty() {
+                Outcome::None
+            } else {
+                Outcome::Some(self.text.clone())
+            }
         }
     }
 
     Copy {
         text: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Rectangle;
+
+    struct Selected(Option<&'static str>);
+
+    impl Text for Selected {
+        fn text(&self) -> Fragment<'_> {
+            "".into()
+        }
+
+        fn select(&mut self, _start: Point, _end: Point, _target: Target) {}
+        fn select_all(&mut self) {}
+        fn deselect(&mut self) {}
+
+        fn copy(&mut self) -> Option<String> {
+            self.0.map(str::to_owned)
+        }
+    }
+
+    fn copy_from(states: &mut [Selected]) -> Option<String> {
+        let mut copy = copy();
+
+        for state in states {
+            copy.text(None, Rectangle::default(), state);
+        }
+
+        match copy.finish() {
+            Outcome::Some(text) => Some(text),
+            Outcome::None => None,
+            Outcome::Chain(_) => panic!("copy does not chain"),
+        }
+    }
+
+    #[test]
+    fn copy_without_a_selection_produces_nothing() {
+        assert_eq!(copy_from(&mut []), None);
+        assert_eq!(copy_from(&mut [Selected(None)]), None);
+        assert_eq!(copy_from(&mut [Selected(Some("")), Selected(None)]), None);
+    }
+
+    #[test]
+    fn copy_joins_every_selection() {
+        assert_eq!(
+            copy_from(&mut [Selected(Some("a")), Selected(None), Selected(Some("b"))]),
+            Some("a\nb".to_owned())
+        );
     }
 }
