@@ -350,8 +350,10 @@ pub fn window_event(
             }
             Ime::Commit(content) => input_method::Event::Commit(content),
             Ime::Disabled => input_method::Event::Closed,
-            // `Ime` is `#[non_exhaustive]` since `winit 0.31`.
-            _ => return None,
+            // Surrounding-text edits are asked of an input the app would
+            // have to describe to the IME first (`ImeCapabilities::
+            // with_surrounding_text`), and the runtime never requests it.
+            Ime::DeleteSurrounding { .. } => return None,
         })),
         WindowEvent::Focused(focused) => Some(Event::Window(if focused {
             window::Event::Focused
