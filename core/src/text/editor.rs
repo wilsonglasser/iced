@@ -507,9 +507,19 @@ impl State {
 
                     Some(Update::InputMethod)
                 }
-                input_method::Event::Commit(content) if self.focus.is_some() => Some(
-                    Update::Action(Action::Edit(Edit::Paste(Arc::new(content.clone())))),
-                ),
+                input_method::Event::Commit(content) if self.focus.is_some() => {
+                    // A commit ends the composition: `winit` no longer sends an
+                    // empty `Preedit` before it, so the preedit is cleared here.
+                    self.preedit = Some(input_method::Preedit {
+                        content: String::new(),
+                        selection: None,
+                        text_size: Some(editor.text_size()),
+                    });
+
+                    Some(Update::Action(Action::Edit(Edit::Paste(Arc::new(
+                        content.clone(),
+                    )))))
+                }
                 _ => None,
             },
             Event::Keyboard(keyboard::Event::KeyPressed {
@@ -1030,5 +1040,75 @@ impl<T: Editor> TextInput for T {
             position: start,
             selection: Some(end),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn focused() -> State {
+        let mut state = State::new();
+        state.focus();
+        state
+    }
+
+    fn feed(state: &mut State, event: input_method::Event) -> Option<Update<()>> {
+        state.update(
+            &(),
+            &Event::InputMethod(event),
+            Rectangle::new(Point::ORIGIN, Size::new(100.0, 20.0)),
+            Padding::ZERO,
+            mouse::Cursor::Unavailable,
+            |_| None,
+        )
+    }
+
+    #[test]
+    fn a_commit_clears_the_preedit_and_inserts_the_text() {
+        let mut state = focused();
+        let _ = feed(&mut state, input_method::Event::Opened);
+        let _ = feed(
+            &mut state,
+            input_method::Event::Preedit("ni hao".to_owned(), Some(0..6)),
+        );
+
+        let update = feed(&mut state, input_method::Event::Commit("你好".to_owned()));
+
+        assert!(matches!(
+            update,
+            Some(Update::Action(Action::Edit(Edit::Paste(text)))) if text.as_str() == "你好"
+        ));
+        assert_eq!(
+            state.preedit.as_ref().map(|preedit| preedit.content.as_str()),
+            Some(""),
+            "the composition must not outlive its commit"
+        );
+    }
+
+    #[test]
+    fn a_commit_leaves_the_state_an_empty_preedit_would() {
+        let mut committed = focused();
+        let mut cleared = focused();
+        for state in [&mut committed, &mut cleared] {
+            let _ = feed(state, input_method::Event::Opened);
+            let _ = feed(state, input_method::Event::Preedit("ka".to_owned(), None));
+        }
+
+        let _ = feed(&mut committed, input_method::Event::Commit("か".to_owned()));
+        let _ = feed(&mut cleared, input_method::Event::Preedit(String::new(), None));
+
+        assert_eq!(committed.preedit, cleared.preedit);
+    }
+
+    #[test]
+    fn a_commit_without_focus_is_ignored() {
+        let mut state = State::new();
+        let _ = feed(&mut state, input_method::Event::Opened);
+
+        let update = feed(&mut state, input_method::Event::Commit("x".to_owned()));
+
+        assert!(update.is_none());
+        assert_eq!(state.preedit, Some(input_method::Preedit::new()));
     }
 }
