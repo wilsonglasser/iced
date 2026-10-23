@@ -124,7 +124,11 @@ pub fn window_attributes(
             WindowAttributesMacOS::default()
                 .with_title_hidden(settings.platform_specific.title_hidden)
                 .with_titlebar_transparent(settings.platform_specific.titlebar_transparent)
-                .with_fullsize_content_view(settings.platform_specific.fullsize_content_view),
+                .with_fullsize_content_view(settings.platform_specific.fullsize_content_view)
+                .with_mouse_down_can_move_window(
+                    settings.platform_specific.mouse_down_can_move_window,
+                )
+                .with_unified_titlebar_compact(settings.platform_specific.unified_titlebar_compact),
         ));
     }
 
