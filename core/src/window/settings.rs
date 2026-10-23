@@ -53,6 +53,17 @@ pub struct Settings {
     /// Whether the window should be visible or not.
     pub visible: bool,
 
+    /// Whether the window should be activated (take focus) when it is first shown.
+    ///
+    /// Set it to `false` for windows that should appear without taking the keyboard
+    /// away from what the user is doing, like tool windows or automated test runs.
+    ///
+    /// ## Platform-specific
+    ///
+    /// Follows `winit`'s `WindowAttributes::with_active`: honored on Windows, macOS and
+    /// the web; ignored elsewhere.
+    pub active: bool,
+
     /// Whether the window should be resizable or not.
     pub resizable: bool,
 
@@ -110,6 +121,7 @@ impl Default for Settings {
             min_size: None,
             max_size: None,
             visible: true,
+            active: true,
             resizable: true,
             minimizable: true,
             closeable: true,

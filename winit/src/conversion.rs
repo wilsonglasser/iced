@@ -58,7 +58,8 @@ pub fn window_attributes(
         .with_blur(settings.blur)
         .with_window_icon(settings.icon.and_then(icon))
         .with_window_level(window_level(settings.level))
-        .with_visible(settings.visible);
+        .with_visible(settings.visible)
+        .with_active(settings.active);
 
     if let Some(position) = position(primary_monitor.as_ref(), settings.size, settings.position) {
         attributes = attributes.with_position(position);
