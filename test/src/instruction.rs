@@ -77,6 +77,7 @@ impl Interaction {
             Event::Keyboard(keyboard) => Self::Keyboard(match keyboard {
                 keyboard::Event::KeyPressed {
                     key,
+                    physical_key,
                     text,
                     modifiers,
                     ..
@@ -102,7 +103,12 @@ impl Interaction {
                                         None?;
                                     }
 
-                                    Key::Char(first)
+                                    // A chord typed under a layout that
+                                    // writes another script is named with
+                                    // its position (`с@keyc`), so the
+                                    // recording replays the key the app
+                                    // resolves it by.
+                                    Key::char_at(first, *physical_key)
                                 }
                                 _ => None?,
                             },
@@ -322,9 +328,9 @@ impl Interaction {
 
         let mouse_release = |button| Event::Mouse(mouse::Event::ButtonReleased(button));
 
-        let key_press = |key| simulator::press_key(key, None);
+        let key_press = |key: Key| simulator::press_key_at(key, key.physical(), None);
 
-        let key_release = |key| simulator::release_key(key);
+        let key_release = |key: Key| simulator::release_key_at(key, key.physical());
 
         Some(match self {
             Interaction::Mouse(mouse) => match mouse {
@@ -403,8 +409,8 @@ impl Interaction {
                 Keyboard::Typewrite(text) => simulator::typewrite(text).collect(),
                 Keyboard::Shortcut { modifiers, key } => vec![
                     Event::Keyboard(keyboard::Event::ModifiersChanged(*modifiers)),
-                    simulator::press_key_with_modifiers(*key, None, *modifiers),
-                    simulator::release_key_with_modifiers(*key, *modifiers),
+                    simulator::press_key_at_with_modifiers(*key, key.physical(), None, *modifiers),
+                    simulator::release_key_at_with_modifiers(*key, key.physical(), *modifiers),
                     Event::Keyboard(keyboard::Event::ModifiersChanged(
                         keyboard::Modifiers::default(),
                     )),
@@ -640,6 +646,105 @@ pub enum Key {
     Function(u8),
     /// A plain character key (e.g. the `k` of `ctrl+k`).
     Char(char),
+    /// A character key named with its position: `с@keyc` is the key that
+    /// types `с` sitting where the US layout has C. A chord under a layout
+    /// that types another script is matched by that position, so a
+    /// recording has to carry it; the names are the W3C `code` values of
+    /// the main block, lowercased (`keya`, `digit1`, `comma`, ...).
+    CharAt(char, keyboard::key::Code),
+}
+
+impl Key {
+    /// A character key, with its position when the character is outside
+    /// ASCII and the position is one the grammar can name; a plain
+    /// [`Key::Char`] otherwise.
+    pub fn char_at(c: char, physical: keyboard::key::Physical) -> Self {
+        match physical {
+            keyboard::key::Physical::Code(code)
+                if !c.is_ascii() && position_name(code).is_some() =>
+            {
+                Key::CharAt(c, code)
+            }
+            _ => Key::Char(c),
+        }
+    }
+
+    /// The physical key this names, or unidentified when it names none.
+    pub fn physical(self) -> keyboard::key::Physical {
+        match self {
+            Key::CharAt(_, code) => keyboard::key::Physical::Code(code),
+            _ => keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
+        }
+    }
+}
+
+/// The positions a key may be named with, and their names: the main
+/// block of the US layout, as W3C `code` values lowercased.
+const POSITIONS: &[(&str, keyboard::key::Code)] = {
+    use keyboard::key::Code;
+    &[
+        ("keya", Code::KeyA),
+        ("keyb", Code::KeyB),
+        ("keyc", Code::KeyC),
+        ("keyd", Code::KeyD),
+        ("keye", Code::KeyE),
+        ("keyf", Code::KeyF),
+        ("keyg", Code::KeyG),
+        ("keyh", Code::KeyH),
+        ("keyi", Code::KeyI),
+        ("keyj", Code::KeyJ),
+        ("keyk", Code::KeyK),
+        ("keyl", Code::KeyL),
+        ("keym", Code::KeyM),
+        ("keyn", Code::KeyN),
+        ("keyo", Code::KeyO),
+        ("keyp", Code::KeyP),
+        ("keyq", Code::KeyQ),
+        ("keyr", Code::KeyR),
+        ("keys", Code::KeyS),
+        ("keyt", Code::KeyT),
+        ("keyu", Code::KeyU),
+        ("keyv", Code::KeyV),
+        ("keyw", Code::KeyW),
+        ("keyx", Code::KeyX),
+        ("keyy", Code::KeyY),
+        ("keyz", Code::KeyZ),
+        ("digit0", Code::Digit0),
+        ("digit1", Code::Digit1),
+        ("digit2", Code::Digit2),
+        ("digit3", Code::Digit3),
+        ("digit4", Code::Digit4),
+        ("digit5", Code::Digit5),
+        ("digit6", Code::Digit6),
+        ("digit7", Code::Digit7),
+        ("digit8", Code::Digit8),
+        ("digit9", Code::Digit9),
+        ("backquote", Code::Backquote),
+        ("minus", Code::Minus),
+        ("equal", Code::Equal),
+        ("bracketleft", Code::BracketLeft),
+        ("bracketright", Code::BracketRight),
+        ("backslash", Code::Backslash),
+        ("semicolon", Code::Semicolon),
+        ("quote", Code::Quote),
+        ("comma", Code::Comma),
+        ("period", Code::Period),
+        ("slash", Code::Slash),
+    ]
+};
+
+fn position_name(code: keyboard::key::Code) -> Option<&'static str> {
+    POSITIONS
+        .iter()
+        .find(|(_, c)| *c == code)
+        .map(|(name, _)| *name)
+}
+
+fn position_from_name(name: &str) -> Option<keyboard::key::Code> {
+    POSITIONS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, code)| *code)
 }
 
 impl From<Key> for keyboard::Key {
@@ -661,7 +766,7 @@ impl From<Key> for keyboard::Key {
             Key::Right => Self::Named(keyboard::key::Named::ArrowRight),
             Key::Space => Self::Named(keyboard::key::Named::Space),
             Key::Function(n) => Self::Named(function_key(n)),
-            Key::Char(c) => Self::Character(SmolStr::new(c.to_string())),
+            Key::Char(c) | Key::CharAt(c, _) => Self::Character(SmolStr::new(c.to_string())),
         }
     }
 }
@@ -750,6 +855,9 @@ mod format {
             Key::Space => "space".to_owned(),
             Key::Function(n) => format!("f{n}"),
             Key::Char(c) => c.to_string(),
+            // The name exists: `char_at` only builds the variant for a
+            // position in the table.
+            Key::CharAt(c, code) => format!("{c}@{}", position_name(code).unwrap_or("?")),
         }
     }
 
@@ -986,6 +1094,21 @@ mod parser {
         satisfy(|c| c.is_ascii_alphanumeric()).parse(input)
     }
 
+    /// A character outside ASCII named with its position: `с@keyc`. The
+    /// position has to be one of the main-block names; `с@keyboard`
+    /// fails to parse rather than becoming a key with no position.
+    fn char_at(input: &str) -> IResult<&str, Key> {
+        map_opt(
+            separated_pair(
+                satisfy(|c: char| !c.is_ascii() && !c.is_whitespace()),
+                char('@'),
+                alphanumeric1,
+            ),
+            |(c, name): (char, &str)| position_from_name(name).map(|code| Key::CharAt(c, code)),
+        )
+        .parse(input)
+    }
+
     fn expectation(input: &str) -> IResult<&str, Expectation> {
         map(preceded(tag("expect "), string), |text| {
             Expectation::Text(text)
@@ -997,6 +1120,7 @@ mod parser {
         // Nested `alt`s: the tuple form tops out well below the number
         // of keys named here.
         alt((
+            char_at,
             alt((
                 map(tag("enter"), |_| Key::Enter),
                 map(tag("escape"), |_| Key::Escape),
@@ -1309,6 +1433,106 @@ mod tests {
         roundtrip("type alt+enter");
     }
 
+    /// A chord under a layout that types another script names the key's
+    /// position: the event carries the character AND the physical key,
+    /// which is what an app resolves such a chord by.
+    #[test]
+    fn it_parses_a_key_named_with_its_position() {
+        use keyboard::key::{Code, Physical};
+
+        assert_eq!(
+            parse("type ctrl+shift+с@keyc"),
+            Instruction::Interact(Interaction::Keyboard(Keyboard::Shortcut {
+                modifiers: keyboard::Modifiers::CTRL | keyboard::Modifiers::SHIFT,
+                key: Key::CharAt('с', Code::KeyC),
+            }))
+        );
+        assert_eq!(
+            parse("type ctrl+б@comma"),
+            Instruction::Interact(Interaction::Keyboard(Keyboard::Shortcut {
+                modifiers: keyboard::Modifiers::CTRL,
+                key: Key::CharAt('б', Code::Comma),
+            }))
+        );
+        assert_eq!(
+            parse("press ۱@digit1"),
+            Instruction::Interact(Interaction::Keyboard(Keyboard::Press(Key::CharAt(
+                '۱',
+                Code::Digit1
+            ))))
+        );
+        roundtrip("type ctrl+shift+с@keyc");
+        roundtrip("type ctrl+б@comma");
+        roundtrip("press ۱@digit1");
+
+        // A name outside the main block is a parse error, never a key
+        // with no position.
+        assert!(Instruction::parse("type ctrl+с@keyboard").is_err());
+        assert!(Instruction::parse("type ctrl+с@numpad1").is_err());
+
+        let events = Interaction::Keyboard(Keyboard::Shortcut {
+            modifiers: keyboard::Modifiers::CTRL,
+            key: Key::CharAt('с', Code::KeyC),
+        })
+        .events(|_| None)
+        .unwrap();
+        let Event::Keyboard(keyboard::Event::KeyPressed {
+            key, physical_key, ..
+        }) = &events[1]
+        else {
+            panic!("the press is the second event");
+        };
+        assert_eq!(*key, keyboard::Key::Character("с".into()));
+        assert_eq!(*physical_key, Physical::Code(Code::KeyC));
+
+        // An ASCII chord stays as it was: no position, unidentified key.
+        let events = Interaction::Keyboard(Keyboard::Shortcut {
+            modifiers: keyboard::Modifiers::CTRL,
+            key: Key::Char('c'),
+        })
+        .events(|_| None)
+        .unwrap();
+        let Event::Keyboard(keyboard::Event::KeyPressed { physical_key, .. }) = &events[1] else {
+            panic!("the press is the second event");
+        };
+        assert!(matches!(physical_key, Physical::Unidentified(_)));
+    }
+
+    /// The recorder writes the position for a chord whose character is
+    /// outside ASCII, and a plain character for an ASCII one.
+    #[test]
+    fn it_records_the_position_of_a_non_ascii_chord() {
+        use keyboard::key::{Code, Physical};
+
+        let press = |c: &str, physical: Physical| {
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: keyboard::Key::Character(c.into()),
+                modified_key: keyboard::Key::Character(c.into()),
+                physical_key: physical,
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::CTRL,
+                text: None,
+                repeat: false,
+            })
+        };
+        assert_eq!(
+            Interaction::from_event(&press("с", Physical::Code(Code::KeyC))).map(|i| i.to_string()),
+            Some("type ctrl+с@keyc".to_owned())
+        );
+        assert_eq!(
+            Interaction::from_event(&press("c", Physical::Code(Code::KeyC))).map(|i| i.to_string()),
+            Some("type ctrl+c".to_owned())
+        );
+        assert_eq!(
+            Interaction::from_event(&press(
+                "с",
+                Physical::Unidentified(keyboard::key::NativeCode::Unidentified)
+            ))
+            .map(|i| i.to_string()),
+            Some("type ctrl+с".to_owned())
+        );
+    }
+
     #[test]
     fn it_parses_key_presses_as_keyboard_interactions() {
         // `press enter` used to be swallowed by the mouse `press`
@@ -1404,8 +1628,25 @@ mod tests {
     #[test]
     fn it_round_trips_every_named_key() {
         for name in [
-            "enter", "escape", "tab", "backspace", "delete", "insert", "space", "home", "end",
-            "pageup", "pagedown", "up", "down", "left", "right", "f1", "f9", "f10", "f12",
+            "enter",
+            "escape",
+            "tab",
+            "backspace",
+            "delete",
+            "insert",
+            "space",
+            "home",
+            "end",
+            "pageup",
+            "pagedown",
+            "up",
+            "down",
+            "left",
+            "right",
+            "f1",
+            "f9",
+            "f10",
+            "f12",
         ] {
             roundtrip(&format!("type {name}"));
             roundtrip(&format!("press {name}"));
@@ -1465,5 +1706,4 @@ mod tests {
         );
         roundtrip("type shift+up");
     }
-
 }

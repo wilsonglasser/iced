@@ -417,7 +417,30 @@ pub fn scroll(delta: mouse::ScrollDelta) -> impl Iterator<Item = Event> {
 
 /// Returns the sequence of events of a key press.
 pub fn press_key(key: impl Into<keyboard::Key>, text: Option<SmolStr>) -> Event {
-    press_key_with_modifiers(key, text, keyboard::Modifiers::default())
+    press_key_at(key, unidentified(), text)
+}
+
+/// Returns the event of a key press at a known physical key, with no
+/// modifiers. The position is what an application resolves a chord by
+/// under a layout that types another script.
+pub fn press_key_at(
+    key: impl Into<keyboard::Key>,
+    physical_key: keyboard::key::Physical,
+    text: Option<SmolStr>,
+) -> Event {
+    press_key_at_with_modifiers(key, physical_key, text, keyboard::Modifiers::default())
+}
+
+/// Returns the event of a key release at a known physical key.
+pub fn release_key_at(
+    key: impl Into<keyboard::Key>,
+    physical_key: keyboard::key::Physical,
+) -> Event {
+    release_key_at_with_modifiers(key, physical_key, keyboard::Modifiers::default())
+}
+
+fn unidentified() -> keyboard::key::Physical {
+    keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified)
 }
 
 /// Returns the sequence of events of a key release.
@@ -427,9 +450,22 @@ pub fn release_key(key: impl Into<keyboard::Key>) -> Event {
 
 /// Returns the event of a key press performed while holding the given
 /// [`Modifiers`](keyboard::Modifiers) (e.g. the `k` press of a
-/// `ctrl+k` chord).
+/// `ctrl+k` chord). The physical key is unidentified, as it is for every
+/// key the grammar names by its character alone.
 pub fn press_key_with_modifiers(
     key: impl Into<keyboard::Key>,
+    text: Option<SmolStr>,
+    modifiers: keyboard::Modifiers,
+) -> Event {
+    press_key_at_with_modifiers(key, unidentified(), text, modifiers)
+}
+
+/// Returns the event of a key press at a known physical key while
+/// holding the given [`Modifiers`](keyboard::Modifiers): the `с` of a
+/// `ctrl+с@keyc` chord typed under a Russian layout.
+pub fn press_key_at_with_modifiers(
+    key: impl Into<keyboard::Key>,
+    physical_key: keyboard::key::Physical,
     text: Option<SmolStr>,
     modifiers: keyboard::Modifiers,
 ) -> Event {
@@ -438,9 +474,7 @@ pub fn press_key_with_modifiers(
     Event::Keyboard(keyboard::Event::KeyPressed {
         key: key.clone(),
         modified_key: key,
-        physical_key: keyboard::key::Physical::Unidentified(
-            keyboard::key::NativeCode::Unidentified,
-        ),
+        physical_key,
         location: keyboard::Location::Standard,
         modifiers,
         repeat: false,
@@ -454,14 +488,22 @@ pub fn release_key_with_modifiers(
     key: impl Into<keyboard::Key>,
     modifiers: keyboard::Modifiers,
 ) -> Event {
+    release_key_at_with_modifiers(key, unidentified(), modifiers)
+}
+
+/// Returns the event of a key release at a known physical key while
+/// holding the given [`Modifiers`](keyboard::Modifiers).
+pub fn release_key_at_with_modifiers(
+    key: impl Into<keyboard::Key>,
+    physical_key: keyboard::key::Physical,
+    modifiers: keyboard::Modifiers,
+) -> Event {
     let key = key.into();
 
     Event::Keyboard(keyboard::Event::KeyReleased {
         key: key.clone(),
         modified_key: key,
-        physical_key: keyboard::key::Physical::Unidentified(
-            keyboard::key::NativeCode::Unidentified,
-        ),
+        physical_key,
         location: keyboard::Location::Standard,
         modifiers,
     })
