@@ -263,6 +263,47 @@ where
                 }
             }
 
+            // A file dragged over the window IS the pointer as far as the
+            // app can tell: while the OS runs the drag (OLE on Windows, the
+            // DnD protocols elsewhere) no `PointerMoved` reaches the
+            // window, so without this the cursor iced reports stays where
+            // it was before the drag began, nothing under the drag is
+            // hovered, and an app that asks WHERE the files landed reads a
+            // stale position. The drag's own positions are replayed as
+            // pointer moves, and its leaving as the pointer leaving, so
+            // every widget sees the drag the way it sees the mouse.
+            match &event {
+                winit::event::WindowEvent::DragEntered {
+                    position: Some(position),
+                    ..
+                }
+                | winit::event::WindowEvent::DragPosition { position, .. } => {
+                    self.window_event(
+                        event_loop,
+                        window_id,
+                        winit::event::WindowEvent::PointerMoved {
+                            device_id: None,
+                            position: *position,
+                            primary: true,
+                            source: winit::event::PointerSource::Mouse,
+                        },
+                    );
+                }
+                winit::event::WindowEvent::DragLeft { .. } => {
+                    self.window_event(
+                        event_loop,
+                        window_id,
+                        winit::event::WindowEvent::PointerLeft {
+                            device_id: None,
+                            position: None,
+                            primary: true,
+                            kind: winit::event::PointerKind::Mouse,
+                        },
+                    );
+                }
+                _ => {}
+            }
+
             match &event {
                 winit::event::WindowEvent::DragEntered { id, .. } => {
                     // A drag only becomes a drop when the target declares
