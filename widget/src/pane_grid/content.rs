@@ -99,7 +99,13 @@ where
 
             tree.children[0].diff(&mut self.body);
         } else {
+            // `state` only lays the shape down: since `Tree::new` stopped
+            // building children, a widget's own children appear in its
+            // `diff`. Rebuilding without reconciling left the title bar's
+            // and the body's trees empty, and the next `layout` indexed
+            // into them.
             *tree = self.state();
+            self.diff(tree);
         }
     }
 
@@ -396,5 +402,61 @@ where
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Length;
+    use crate::{MouseArea, Space};
+
+    type Body = Space;
+    type Title = MouseArea<'static, (), Space>;
+
+    fn content() -> Content<'static, (), Title, Body, crate::Theme, ()> {
+        Content::new(Space::new().width(Length::Fill).height(Length::Fill))
+            .title_bar(TitleBar::new(MouseArea::new(Space::new().width(40).height(20))))
+    }
+
+    fn lay_out(content: &mut Content<'static, (), Title, Body, crate::Theme, ()>, tree: &mut Tree) {
+        let size = Size::new(200.0, 100.0);
+        content.layout(tree, &(), &layout::Limits::new(size, size));
+    }
+
+    #[test]
+    fn a_tree_of_another_shape_is_rebuilt_reconciled() {
+        let mut content = content();
+        for mut tree in [
+            Tree::empty(),
+            Tree {
+                children: vec![Tree::empty()],
+                ..Tree::empty()
+            },
+            Tree {
+                children: vec![Tree::empty(), Tree::empty(), Tree::empty()],
+                ..Tree::empty()
+            },
+        ] {
+            content.diff(&mut tree);
+
+            assert_eq!(tree.children.len(), 2);
+            // The title is a mouse area: reconciled, it holds its child.
+            assert_eq!(tree.children[1].children[0].children.len(), 1);
+
+            lay_out(&mut content, &mut tree);
+        }
+    }
+
+    #[test]
+    fn a_tree_of_its_own_shape_is_reconciled_in_place() {
+        let mut content = content();
+        let mut tree = content.state();
+        content.diff(&mut tree);
+        lay_out(&mut content, &mut tree);
+
+        content.diff(&mut tree);
+        assert_eq!(tree.children[1].children[0].children.len(), 1);
+        lay_out(&mut content, &mut tree);
     }
 }
